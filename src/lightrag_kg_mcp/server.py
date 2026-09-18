@@ -233,8 +233,5 @@ def kg_setup(models: str = "both") -> str:
     out["env"]["deepseek_key"] = bool(DEEPSEEK_KEY)
     return json.dumps(out, indent=1)
 
-def main():
-    mcp.run(transport="stdio")
-
 if __name__ == "__main__":
-    main()
+    mcp.run(transport="stdio")
