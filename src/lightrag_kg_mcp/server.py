@@ -10,6 +10,12 @@ Tools:
 Graphs live in ~/lightrag/kg_<name>/, embeddings are local models only.
 """
 import os, sys, json, time, asyncio, hashlib, shutil, glob, subprocess
+
+# tiktoken may need o200k_base offline: if a cached copy exists anywhere, point TIKTOKEN_CACHE_DIR at it
+if "TIKTOKEN_CACHE_DIR" not in os.environ:
+    _tc = os.path.expanduser("~/.cache/tiktoken_cache")
+    if os.path.isdir(_tc):
+        os.environ["TIKTOKEN_CACHE_DIR"] = _tc
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
