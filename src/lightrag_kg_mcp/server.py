@@ -141,9 +141,16 @@ async def _load_graph(name: str):
     from lightrag.utils import EmbeddingFunc
     from sentence_transformers import SentenceTransformer
     model_name = meta["embedding_model"]
-    dim = 768
-    # ONNX-first embedding backend, torch-cpu fallback (ONNX ~1.5x faster on CPU, identical outputs)
+    # Probe actual embedding dim at runtime — hardcoding 768 broke 1024-dim models (e.g. heydariAI/persian-embeddings)
     _onnx = _get_or_export_onnx(model_name)
+    import numpy as _np
+    if _onnx is not None:
+        _sess, _tok = _onnx
+        _enc = _tok(["dim probe"], padding=True, return_tensors="np")
+        dim = int(_sess.run(None, {"input_ids": _enc["input_ids"].astype(_np.int64),
+                                   "attention_mask": _enc["attention_mask"].astype(_np.int64)})[0].shape[1])
+    else:
+        dim = int(_np.asarray(_get_st_model(model_name).encode(["dim probe"])).shape[1])
 
     async def embed(texts):
         import numpy as np
