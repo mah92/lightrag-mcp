@@ -6,10 +6,11 @@ Tools:
   kg_add_book(graph, pdf_path)  - book -> skill (book-to-skill pipeline) -> insert into graph
   kg_add_repo(graph, repo_path) - repo -> arc42 doc + skill its reference PDFs -> insert
   kg_ask(graph, question, mode) - query a graph (loads it, keeps warm 15 min)
+  kg_add_markdown(graph, markdown|md_path) - insert markdown text/file straight into a graph
 
 Graphs live in ~/lightrag/kg_<name>/, embeddings are local models only.
 """
-import os, sys, json, time, asyncio, hashlib, shutil, glob, subprocess
+import os, re, sys, json, time, asyncio, hashlib, shutil, glob, subprocess
 
 # tiktoken may need o200k_base offline: if a cached copy exists anywhere, point TIKTOKEN_CACHE_DIR at it
 if "TIKTOKEN_CACHE_DIR" not in os.environ:
@@ -188,8 +189,29 @@ async def _load_graph(name: str):
     _LAST_USE[name] = time.time()
     return rag
 
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+async def _insert_files(graph: str, files: list[str]) -> int:
+    """Insert markdown files into a graph unchanged, return the file count."""
+    rag = await _load_graph(graph)
+    texts = [open(f, encoding="utf-8").read() for f in files]
+    await rag.ainsert(texts, file_paths=files)
+    return len(files)
+
+
+def _safe_name(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", s.strip()).strip("-.") or "note"
+
+
+async def _delete_by_file_name(graph: str, names: set) -> list:
+    """Delete documents whose stored file name is in `names` (the replace=True path)."""
+    from lightrag.base import DocStatus
+    rag = await _load_graph(graph)
+    docs = await rag.doc_status.get_docs_by_statuses(list(DocStatus))
+    removed = []
+    for doc_id, st in docs.items():
+        if os.path.basename(st.file_path or "") in names:
+            res = await rag.adelete_by_doc_id(doc_id)
+            removed.append(f"{doc_id}:{getattr(res, 'status', 'unknown')}")
+    return removed
 
 # ---------------- tools ----------------
 @mcp.tool()
@@ -214,7 +236,7 @@ def kg_list() -> str:
     return json.dumps(out, indent=1)
 
 @mcp.tool()
-def kg_add_book(graph: str, pdf_path: str, language: str = "en") -> str:
+async def kg_add_book(graph: str, pdf_path: str, language: str = "en") -> str:
     """Convert a book PDF into a skill (book-to-skill pipeline via subagent delegate script) and insert its markdown into the graph."""
     if not os.path.exists(pdf_path):
         return json.dumps({"error": f"no such pdf: {pdf_path}"})
@@ -234,16 +256,11 @@ def kg_add_book(graph: str, pdf_path: str, language: str = "en") -> str:
         bn = os.path.basename(f)
         if bn == "SKILL.md" or True:
             shutil.copy(f, f"{BASE}/{graph}/inputs/{slug}__{bn}"); n += 1
-    async def _ins():
-        rag = await _load_graph(graph)
-        files = sorted(glob.glob(f"{BASE}/{graph}/inputs/{slug}__*.md"))
-        await rag.ainsert([open(f, encoding="utf-8").read() for f in files], file_paths=files)
-        return len(files)
-    inserted = _run(_ins())
+    inserted = await _insert_files(graph, sorted(glob.glob(f"{BASE}/{graph}/inputs/{slug}__*.md")))
     return json.dumps({"ok": True, "skill": slug, "docs_inserted": inserted})
 
 @mcp.tool()
-def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
+async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
     """For a cloned repo: write arc42 doc (if missing), skill-ify its reference PDFs, insert all into the graph."""
     repo_path = os.path.abspath(repo_path)
     if not os.path.isdir(repo_path):
@@ -273,25 +290,60 @@ def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
                 dst = f"{BASE}/{graph}/inputs/{slug}__{os.path.basename(f)}"
                 shutil.copy(f, dst)
                 if os.path.basename(dst) not in docs_added: docs_added.append(os.path.basename(dst))
-    async def _ins():
-        rag = await _load_graph(graph)
-        files = [f"{BASE}/{graph}/inputs/{d}" for d in docs_added if os.path.exists(f"{BASE}/{graph}/inputs/{d}")]
-        await rag.ainsert([open(f, encoding="utf-8").read() for f in files], file_paths=files)
-        return len(files)
-    inserted = _run(_ins())
+    files = [f"{BASE}/{graph}/inputs/{d}" for d in docs_added if os.path.exists(f"{BASE}/{graph}/inputs/{d}")]
+    inserted = await _insert_files(graph, files)
     return json.dumps({"ok": True, "repo": repo, "docs": docs_added, "inserted": inserted})
 
 @mcp.tool()
-def kg_ask(graph: str, question: str, mode: str = "naive") -> str:
-    """Ask the graph. mode: naive (vector only, cheap) | hybrid (needs LLM keyword extraction). Graph stays warm 15 min."""
-    async def _q():
-        rag = await _load_graph(graph)
-        if mode == "naive":
-            res = await rag.aquery(question, param=__import__("lightrag").QueryParam(mode="naive"))
+async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc_name: str = "", replace: bool = False) -> str:
+    """Insert markdown straight into a graph - no PDF/book/repo pipeline.
+
+    markdown: inline markdown text (notes written directly)
+    md_path:  a .md file, or a directory (every *.md inside, recursively)
+    doc_name: stored document name (default: the file's own name, or 'note' for inline text)
+    replace:  delete a document already stored under the same name first. Without it an
+              identical re-insert is a no-op (dedup is by content) and changed content
+              leaves the old copy in the graph.
+    Returns {"ok": true, "files": [...], "docs_inserted": n, "removed": [...]}.
+    """
+    if not os.path.exists(f"{BASE}/{graph}/meta.json"):
+        return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create first."})
+    jobs = []  # (stored file name, markdown text)
+    if markdown.strip():
+        nm = _safe_name(doc_name or "note")
+        jobs.append((nm if nm.endswith(".md") else nm + ".md", markdown))
+    elif md_path:
+        p = os.path.abspath(os.path.expanduser(md_path))
+        if os.path.isdir(p):
+            root = _safe_name(os.path.basename(p.rstrip("/")))
+            for f in sorted(glob.glob(f"{p}/**/*.md", recursive=True)):
+                rel = _safe_name(os.path.relpath(f, p).replace("/", "__"))
+                jobs.append((f"{root}__{rel}", open(f, encoding="utf-8").read()))
+        elif os.path.isfile(p):
+            nm = _safe_name(doc_name) if doc_name else os.path.basename(p)
+            jobs.append((nm if nm.endswith(".md") else nm + ".md", open(p, encoding="utf-8").read()))
         else:
-            res = await rag.aquery(question, param=__import__("lightrag").QueryParam(mode="hybrid"))
-        return str(res)
-    return _run(_q())
+            return json.dumps({"error": f"no such md file or dir: {md_path}"})
+    if not jobs:
+        return json.dumps({"error": "give markdown text or md_path"})
+    indir = f"{BASE}/{graph}/inputs"
+    os.makedirs(indir, exist_ok=True)
+    files = []
+    for name, text in jobs:
+        dst = f"{indir}/{name}"
+        open(dst, "w", encoding="utf-8").write(text)
+        files.append(dst)
+    removed = await _delete_by_file_name(graph, {os.path.basename(f) for f in files}) if replace else []
+    inserted = await _insert_files(graph, files)
+    return json.dumps({"ok": True, "files": [os.path.basename(f) for f in files],
+                       "docs_inserted": inserted, "removed": removed})
+
+@mcp.tool()
+async def kg_ask(graph: str, question: str, mode: str = "naive") -> str:
+    """Ask the graph. mode: naive (vector only, cheap) | hybrid (needs LLM keyword extraction). Graph stays warm 15 min."""
+    rag = await _load_graph(graph)
+    qp = __import__("lightrag").QueryParam(mode="naive" if mode == "naive" else "hybrid")
+    return str(await rag.aquery(question, param=qp))
 
 
 @mcp.tool()

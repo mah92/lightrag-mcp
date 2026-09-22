@@ -17,8 +17,8 @@ but generic: any markdown corpus works.
 Key properties:
 - **Local embeddings only** (HuggingFace models, no cloud embedding APIs)
 - **Language-aware model selection**: Persian graphs use `heydariAI/persian-embeddings`,
-  English/multilingual graphs use `intfloat/multilingual-e5-base` (chosen by benchmark:
-  Recall@5 0.917 / MRR@10 0.817 vs 0.833/0.733 and 84x faster corpus indexing)
+  Graphs created now use `intfloat/multilingual-e5-small`; graphs built earlier keep the
+  model pinned in their `meta.json` (`intfloat/multilingual-e5-base`, `heydariAI/persian-embeddings`)
 - **Warm graph cache**: loaded graphs stay in memory for 15 minutes between calls
 
 ## Tools
@@ -30,6 +30,7 @@ Key properties:
 | `kg_setup(models)` | Pre-download embedding models, verify lightrag/tiktoken/torch |
 | `kg_add_book(graph, pdf_path)` | Book PDF → text extraction → skill generation (deepseek-chat) → insert into graph |
 | `kg_add_repo(graph, repo_path)` | Repo → arc42 doc generation + skill-ify `docs/references/*.pdf` → insert |
+| `kg_add_markdown(graph, markdown, md_path, doc_name, replace)` | Insert markdown directly — inline text, a `.md` file, or a directory of them (no book/repo pipeline); `replace=true` refreshes a doc already stored under the same name |
 | `kg_ask(graph, question, mode)` | Query the graph (`naive` = vector only, `hybrid` = + LLM keywords) |
 | `kg_delete(graph, confirm)` | Delete a graph completely (requires `confirm=true`) |
 
