@@ -55,6 +55,7 @@ def _get_st_model(model_name):
 
 # Pre-exported ONNX models on HuggingFace (mah92) - downloaded instead of local torch export
 HF_ONNX_REPOS = {
+    "intfloat/multilingual-e5-small": "mah92/e5-small-onnx",
     "intfloat/multilingual-e5-base": "mah92/e5-base-onnx",
     "heydariAI/persian-embeddings": "mah92/persian-embeddings-onnx",
 }
@@ -124,7 +125,9 @@ def _export_onnx(model_name: str, out_path: str):
     tok.save_pretrained(os.path.dirname(out_path))
 
 def _model_for(lang: str) -> str:
-    return "heydariAI/persian-embeddings" if lang == "fa" else "intfloat/multilingual-e5-base"
+    # e5-small wins the fa+en benchmark (0.395/0.772 MRR@10, fastest index); heydariAI stays
+    # available for graphs already built with it (meta.json pins their model).
+    return "intfloat/multilingual-e5-small"
 
 async def _load_graph(name: str):
     _evict_expired()
@@ -191,7 +194,7 @@ def _run(coro):
 # ---------------- tools ----------------
 @mcp.tool()
 def kg_create(name: str, language: str = "en") -> str:
-    """Create a new LightRAG graph. language: 'fa' -> Heidari embeddings, 'en' -> multilingual-e5-base."""
+    """Create a new LightRAG graph. Default embedding is multilingual-e5-small for all languages (benchmark winner); existing graphs keep their pinned model."""
     if language not in ("fa", "en"):
         return json.dumps({"error": "language must be fa or en"})
     os.makedirs(f"{BASE}/{name}/graph", exist_ok=True)
@@ -308,8 +311,8 @@ def kg_delete(graph: str, confirm: bool = False) -> str:
 def kg_setup(models: str = "both") -> str:
     """Pre-download embedding models + verify environment. models: 'both' | 'e5' | 'heidari'. Returns status of each component."""
     out = {"models": {}, "env": {}}
-    want = {"both": ["intfloat/multilingual-e5-base", "heydariAI/persian-embeddings"],
-            "e5": ["intfloat/multilingual-e5-base"],
+    want = {"both": ["intfloat/multilingual-e5-small", "heydariAI/persian-embeddings"],
+            "e5": ["intfloat/multilingual-e5-small"],
             "heidari": ["heydariAI/persian-embeddings"]}[models]
     os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
     from sentence_transformers import SentenceTransformer
