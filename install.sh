@@ -42,7 +42,7 @@ EOF
 }
 
 if [ "$CHECK_ONLY" = "1" ]; then
-  [ -d "$VENV" ] || { echo "FAIL: no venv at $VENV (run ./install.sh)"; exit 1; }
+  [ -d "$VENV" ] || { echo "FAIL: no venv at $VENV"; echo "      (run ./install.sh, or point --check at the real one: LIGHTRAG_MCP_VENV=~/.hermes/mcp-venv ./install.sh --check)"; exit 1; }
   echo "==> verify only"
   verify && echo "OK: install looks healthy" || { echo "FAIL: see above"; exit 1; }
   exit 0
