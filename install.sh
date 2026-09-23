@@ -39,6 +39,11 @@ EOF
   done
   echo "  console scripts ok (kg-mcp kg-query kg-ask kg-add-book)"
   echo "  DEEPSEEK_API_KEY: $(grep -c '^DEEPSEEK_API_KEY=..*' "$HOME/.hermes/.env" 2>/dev/null || echo 0) non-empty entry in ~/.hermes/.env"
+  if [ -n "$(ls -A "$HOME/.cache/tiktoken_cache" 2>/dev/null)" ]; then
+    echo "  tiktoken cache: ok"
+  else
+    echo "  tiktoken cache: EMPTY — kg-* will fail with a tiktoken connection error (see README)"
+  fi
 }
 
 if [ "$CHECK_ONLY" = "1" ]; then
@@ -60,6 +65,20 @@ fi
 
 echo "==> lightrag-mcp + dependencies"
 "$VENV/bin/pip" install -q -e "$REPO_DIR"
+
+# tiktoken fetches its BPE file from an Azure blob; on a network that cannot reach it
+# (errno 101 here) LightRAG dies at load time, so cache it now while we are setting up.
+TIKC="$HOME/.cache/tiktoken_cache"
+mkdir -p "$TIKC"
+if [ -n "$(ls -A "$TIKC" 2>/dev/null)" ] && [ "$(ls -A "$TIKC" | wc -l)" -gt 0 ]; then
+  echo "==> tiktoken cache already populated: $(ls "$TIKC" | head -1)"
+elif TIKTOKEN_CACHE_DIR="$TIKC" "$VENV/bin/python" -c "import tiktoken; tiktoken.get_encoding('o200k_base')" >/dev/null 2>&1; then
+  echo "==> tiktoken cache populated ($TIKC)"
+else
+  echo "==> WARNING: could not fetch o200k_base (Azure blob unreachable from this network)."
+  echo "    Copy a populated tiktoken cache into $TIKC from a connected machine, or every"
+  echo "    kg-* call will raise a tiktoken connection error."
+fi
 
 echo "==> verify (the check that would have caught the missing-lightrag outage)"
 verify
