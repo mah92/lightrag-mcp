@@ -3,6 +3,7 @@
 
 Tools:
   kg_create(name, language)     - create a new graph (embedding model by language: fa->Heidari, en->e5)
+  kg_register(name, root)       - register an EXISTING graph that lives outside ~/lightrag/kg
   kg_add_book(graph, pdf_path)  - book -> skill (book-to-skill pipeline) -> insert into graph
   kg_add_repo(graph, repo_path) - repo -> arc42 doc + skill its reference PDFs -> insert
   kg_ask(graph, question, mode) - query a graph (loads it, keeps warm 15 min)
@@ -125,6 +126,43 @@ def _export_onnx(model_name: str, out_path: str):
                           opset_version=14)
     tok.save_pretrained(os.path.dirname(out_path))
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _script(name: str) -> str:
+    """Pipeline helpers ship beside server.py; older installs keep copies in ~/lightrag/kg_mcp."""
+    for d in (_HERE, os.path.expanduser("~/lightrag/kg_mcp")):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(_HERE, name)
+
+
+def _meta_of(name: str):
+    """(meta, path) for a registered graph; (None, path) when the registry entry is missing."""
+    mp = f"{BASE}/{name}/meta.json"
+    if not os.path.exists(mp):
+        return None, mp
+    try:
+        return json.load(open(mp)), mp
+    except Exception:
+        return {}, mp
+
+
+def _graph_dir(name: str, meta=None) -> str:
+    """Where a graph's DATA lives: BASE/<name> normally, or meta['root'] for graphs kept elsewhere
+    (e.g. ~/lightrag/ins-nav). A symlinked BASE/<name>/graph|inputs also works, but 'root' needs no
+    symlinks and is what kg_register writes."""
+    if meta is None:
+        meta = _meta_of(name)[0] or {}
+    root = meta.get("root")
+    return os.path.abspath(os.path.expanduser(root)) if root else f"{BASE}/{name}"
+
+
+def _inputs_dir(name: str, meta=None) -> str:
+    return f"{_graph_dir(name, meta)}/inputs"
+
+
 def _model_for(lang: str) -> str:
     # e5-small wins the fa+en benchmark (0.395/0.772 MRR@10, fastest index); heydariAI stays
     # available for graphs already built with it (meta.json pins their model).
@@ -135,11 +173,10 @@ async def _load_graph(name: str):
     if name in _GRAPHS:
         _LAST_USE[name] = time.time()
         return _GRAPHS[name]
-    meta_p = f"{BASE}/{name}/meta.json"
-    if not os.path.exists(meta_p):
-        raise ValueError(f"graph '{name}' does not exist. Use kg_create first.")
-    meta = json.load(open(meta_p))
-    wd = f"{BASE}/{name}/graph"
+    meta, meta_p = _meta_of(name)
+    if meta is None:
+        raise ValueError(f"graph '{name}' does not exist. Use kg_create or kg_register first.")
+    wd = f"{_graph_dir(name, meta)}/graph"
     from lightrag import LightRAG
     from lightrag.llm.openai import openai_complete_if_cache
     from lightrag.utils import EmbeddingFunc
@@ -231,7 +268,7 @@ def kg_list() -> str:
     out = []
     for d in sorted(glob.glob(f"{BASE}/*/meta.json")):
         m = json.load(open(d))
-        n = len(glob.glob(os.path.dirname(d) + "/inputs/*.md"))
+        n = len(glob.glob(_inputs_dir(m["name"], m) + "/*.md"))
         out.append({"graph": m["name"], "language": m.get("language"), "embedding": m.get("embedding_model"), "docs": n})
     return json.dumps(out, indent=1)
 
@@ -244,19 +281,24 @@ async def kg_add_book(graph: str, pdf_path: str, language: str = "en") -> str:
     extract_dir = f"/tmp/extracted/{slug}"
     os.makedirs(extract_dir, exist_ok=True)
     subprocess.run(["pdftotext", pdf_path, f"{extract_dir}/full_text.txt"], timeout=600)
+    # chapter boundaries from the PDF's own bookmarks/ToC; generate_skill.py picks up sections.json when
+    # present (a "Chapter N" regex alone found 2 of 10 chapters in a 681-page book). Non-fatal.
+    sec = _script("make_sections.py")
+    if os.path.exists(sec):
+        sr = subprocess.run([PY, sec, pdf_path, extract_dir], capture_output=True, text=True, timeout=1800)
+        if sr.returncode != 0:
+            print(f"make_sections failed ({sr.returncode}): {sr.stderr[-300:]}")
     # generate a skill via the no-agent batch script (book-to-lightrag-pipeline style), then insert the md files
     skill_dir = f"{LIBRARY}/skills/all-skills/{slug}"
-    script = os.path.expanduser("~/lightrag/kg_mcp/generate_skill.py")
+    script = _script("generate_skill.py")
     r = subprocess.run([PY, script, extract_dir, skill_dir, language], capture_output=True, text=True, timeout=7200)
     if not os.path.exists(f"{skill_dir}/SKILL.md"):
         return json.dumps({"error": "skill generation failed", "stderr": r.stderr[-400:]})
-    os.makedirs(f"{BASE}/{graph}/inputs", exist_ok=True)
-    n = 0
+    indir = _inputs_dir(graph)
+    os.makedirs(indir, exist_ok=True)
     for f in [f"{skill_dir}/SKILL.md"] + glob.glob(f"{skill_dir}/*.md") + glob.glob(f"{skill_dir}/chapters/*.md"):
-        bn = os.path.basename(f)
-        if bn == "SKILL.md" or True:
-            shutil.copy(f, f"{BASE}/{graph}/inputs/{slug}__{bn}"); n += 1
-    inserted = await _insert_files(graph, sorted(glob.glob(f"{BASE}/{graph}/inputs/{slug}__*.md")))
+        shutil.copy(f, f"{indir}/{slug}__{os.path.basename(f)}")
+    inserted = await _insert_files(graph, sorted(glob.glob(f"{indir}/{slug}__*.md")))
     return json.dumps({"ok": True, "skill": slug, "docs_inserted": inserted})
 
 @mcp.tool()
@@ -270,11 +312,11 @@ async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
     # 1) arc42 if missing -> delegate to arc42 script
     arc = f"{repo_path}/docs/arc42/arc42.md"
     if not os.path.exists(arc):
-        script = os.path.expanduser("~/lightrag/kg_mcp/make_arc42.py")
-        subprocess.run([PY, script, repo_path], capture_output=True, text=True, timeout=7200)
+        subprocess.run([PY, _script("make_arc42.py"), repo_path], capture_output=True, text=True, timeout=7200)
+    indir = _inputs_dir(graph)
     if os.path.exists(arc):
-        os.makedirs(f"{BASE}/{graph}/inputs", exist_ok=True)
-        shutil.copy(arc, f"{BASE}/{graph}/inputs/arc42__{repo}__arc42.md")
+        os.makedirs(indir, exist_ok=True)
+        shutil.copy(arc, f"{indir}/arc42__{repo}__arc42.md")
         docs_added.append(f"arc42__{repo}__arc42.md")
     # 2) skill-ify reference PDFs
     for pdf in glob.glob(f"{repo_path}/docs/references/*.pdf"):
@@ -283,14 +325,13 @@ async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
         if not os.path.exists(f"{skill_dir}/SKILL.md"):
             ed = f"/tmp/extracted/{slug}"; os.makedirs(ed, exist_ok=True)
             subprocess.run(["pdftotext", pdf, f"{ed}/full_text.txt"], timeout=600)
-            script = os.path.expanduser("~/lightrag/kg_mcp/generate_skill.py")
-            subprocess.run([PY, script, ed, skill_dir, language], capture_output=True, text=True, timeout=7200)
+            subprocess.run([PY, _script("generate_skill.py"), ed, skill_dir, language], capture_output=True, text=True, timeout=7200)
         if os.path.exists(f"{skill_dir}/SKILL.md"):
             for f in [f"{skill_dir}/SKILL.md"] + glob.glob(f"{skill_dir}/*.md") + glob.glob(f"{skill_dir}/chapters/*.md"):
-                dst = f"{BASE}/{graph}/inputs/{slug}__{os.path.basename(f)}"
+                dst = f"{indir}/{slug}__{os.path.basename(f)}"
                 shutil.copy(f, dst)
                 if os.path.basename(dst) not in docs_added: docs_added.append(os.path.basename(dst))
-    files = [f"{BASE}/{graph}/inputs/{d}" for d in docs_added if os.path.exists(f"{BASE}/{graph}/inputs/{d}")]
+    files = [f"{indir}/{d}" for d in docs_added if os.path.exists(f"{indir}/{d}")]
     inserted = await _insert_files(graph, files)
     return json.dumps({"ok": True, "repo": repo, "docs": docs_added, "inserted": inserted})
 
@@ -306,8 +347,8 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
               leaves the old copy in the graph.
     Returns {"ok": true, "files": [...], "docs_inserted": n, "removed": [...]}.
     """
-    if not os.path.exists(f"{BASE}/{graph}/meta.json"):
-        return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create first."})
+    if _meta_of(graph)[0] is None:
+        return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
     jobs = []  # (stored file name, markdown text)
     if markdown.strip():
         nm = _safe_name(doc_name or "note")
@@ -326,7 +367,7 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
             return json.dumps({"error": f"no such md file or dir: {md_path}"})
     if not jobs:
         return json.dumps({"error": "give markdown text or md_path"})
-    indir = f"{BASE}/{graph}/inputs"
+    indir = _inputs_dir(graph)
     os.makedirs(indir, exist_ok=True)
     files = []
     for name, text in jobs:
@@ -347,17 +388,56 @@ async def kg_ask(graph: str, question: str, mode: str = "naive") -> str:
 
 
 @mcp.tool()
-def kg_delete(graph: str, confirm: bool = False) -> str:
-    """Delete a graph completely (meta, graph storage, inputs). Requires confirm=True."""
+def kg_delete(graph: str, confirm: bool = False, delete_data: bool = False) -> str:
+    """Delete a graph (registry entry + its data). Requires confirm=True.
+
+    For a registered graph whose data lives elsewhere (meta root, e.g. kg_nav -> ~/lightrag/ins-nav),
+    only the registry entry is removed unless delete_data=True — the data directory is never deleted
+    silently.
+    """
     import shutil as _sh
     gd = f"{BASE}/{graph}"
     if not os.path.isdir(gd):
         return json.dumps({"error": f"graph '{graph}' does not exist"})
+    meta = _meta_of(graph)[0] or {}
+    data = _graph_dir(graph, meta)
+    external = os.path.abspath(data) != os.path.abspath(gd)
     if not confirm:
-        return json.dumps({"error": "set confirm=true to actually delete", "would_delete": gd})
+        return json.dumps({"error": "set confirm=true to actually delete", "would_delete": gd,
+                           "data_dir": data if external else None,
+                           "note": "data lives outside the registry dir; pass delete_data=true to remove it too" if external else None})
     _GRAPHS.pop(graph, None); _LAST_USE.pop(graph, None)
     _sh.rmtree(gd)
-    return json.dumps({"ok": True, "deleted": gd})
+    out = {"ok": True, "deleted": gd}
+    if external:
+        out["data_left_in_place"] = data
+        out["note"] = "registry entry removed; pass delete_data=true to also remove the data dir"
+        if delete_data:
+            _sh.rmtree(data); out["deleted_data"] = data
+    return json.dumps(out)
+
+
+@mcp.tool()
+def kg_register(graph: str, root: str, language: str = "en", force: bool = False) -> str:
+    """Register an EXISTING LightRAG graph kept outside ~/lightrag/kg (e.g. ~/lightrag/ins-nav) so the
+    MCP server can query and extend it in place. Expects <root>/graph/ and <root>/inputs/; writes
+    <BASE>/<graph>/meta.json with "root": root. No symlinks, no data copying."""
+    root = os.path.abspath(os.path.expanduser(root))
+    if not os.path.isdir(f"{root}/graph"):
+        return json.dumps({"error": f"no graph storage at {root}/graph"})
+    mp = f"{BASE}/{graph}/meta.json"
+    if os.path.exists(mp) and not force:
+        return json.dumps({"error": f"'{graph}' is already registered (meta.json exists)",
+                           "hint": "pass force=true to repoint it", "meta": mp})
+    os.makedirs(f"{BASE}/{graph}", exist_ok=True)
+    os.makedirs(f"{root}/inputs", exist_ok=True)
+    meta = {"name": graph, "language": language, "embedding_model": _model_for(language),
+            "created": time.strftime("%Y-%m-%d"), "root": root,
+            "note": "registers an existing graph in place (kg_register)"}
+    json.dump(meta, open(mp, "w"), indent=1)
+    _GRAPHS.pop(graph, None); _LAST_USE.pop(graph, None)
+    return json.dumps({"ok": True, "graph": graph, "root": root,
+                       "docs": len(glob.glob(f"{root}/inputs/*.md"))})
 
 @mcp.tool()
 def kg_setup(models: str = "both") -> str:

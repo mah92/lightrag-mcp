@@ -16,9 +16,11 @@ but generic: any markdown corpus works.
 
 Key properties:
 - **Local embeddings only** (HuggingFace models, no cloud embedding APIs)
-- **Language-aware model selection**: Persian graphs use `heydariAI/persian-embeddings`,
-  Graphs created now use `intfloat/multilingual-e5-small`; graphs built earlier keep the
-  model pinned in their `meta.json` (`intfloat/multilingual-e5-base`, `heydariAI/persian-embeddings`)
+- **Language-aware model selection**: new graphs use `intfloat/multilingual-e5-small`; graphs built
+  earlier keep the model pinned in their `meta.json` (`intfloat/multilingual-e5-base`,
+  `heydariAI/persian-embeddings`)
+- **Graphs anywhere on disk**: `kg_register` points the server at a graph that already lives
+  elsewhere (no symlinks, no data copying)
 - **Warm graph cache**: loaded graphs stay in memory for 15 minutes between calls
 
 ## Tools
@@ -28,13 +30,28 @@ Key properties:
 | `kg_create(name, language)` | Create a new graph; picks embedding model by language (fa/en) |
 | `kg_list()` | List graphs with embedding model + doc count |
 | `kg_setup(models)` | Pre-download embedding models, verify lightrag/tiktoken/torch |
-| `kg_add_book(graph, pdf_path)` | Book PDF → text extraction → skill generation (deepseek-chat) → insert into graph |
+| `kg_add_book(graph, pdf_path)` | Book PDF → text extraction → section boundaries from the PDF's own bookmarks (`make_sections.py`, fallback `"Chapter N"` regex) → skill generation (deepseek-chat) → insert into graph |
 | `kg_add_repo(graph, repo_path)` | Repo → arc42 doc generation + skill-ify `docs/references/*.pdf` → insert |
 | `kg_add_markdown(graph, markdown, md_path, doc_name, replace)` | Insert markdown directly — inline text, a `.md` file, or a directory of them (no book/repo pipeline); `replace=true` refreshes a doc already stored under the same name |
 | `kg_ask(graph, question, mode)` | Query the graph (`naive` = vector only, `hybrid` = + LLM keywords) |
-| `kg_delete(graph, confirm)` | Delete a graph completely (requires `confirm=true`) |
+| `kg_register(graph, root)` | Register an EXISTING graph kept outside `~/lightrag/kg` (writes `meta.json` with `"root": root`; expects `<root>/graph/` + `<root>/inputs/`) |
+| `kg_delete(graph, confirm, delete_data)` | Delete a graph (requires `confirm=true`); a registered graph whose data lives elsewhere keeps its data unless `delete_data=true` |
 
 The target graph must be named on every call (e.g. `kg_nav`).
+
+### Graphs outside `~/lightrag/kg`
+
+A graph's data lives in `~/lightrag/kg/<name>/` by default. For a graph already built elsewhere
+(e.g. the INS-nav graph at `~/lightrag/ins-nav`), register it in place:
+
+```
+kg_register("kg_nav", "/home/oem/lightrag/ins-nav")
+```
+
+`meta.json` then carries `"root": "/home/oem/lightrag/ins-nav"`, and every tool (list/ask/add_*/
+delete) resolves `<root>/graph` + `<root>/inputs` — no symlink farm, no copying. `meta.json` itself
+stays under `~/lightrag/kg/<name>/` as the registry entry, and `kg_delete` never removes data that
+lives outside it unless you pass `delete_data=true`.
 
 ## Install
 
@@ -48,6 +65,11 @@ pip install sentence-transformers transformers tiktoken requests
 ```
 
 Model downloads happen automatically on first use, or pre-fetch via `kg_setup`.
+
+**The interpreter that runs the server must have `lightrag-hku` + `openai`.** A separate MCP venv
+(e.g. `~/.hermes/mcp-venv`, needed for `mcp<2`) that lost `lightrag` fails every graph operation
+with `ModuleNotFoundError` while `kg_create` / `kg_list` keep working — which hides the problem.
+Check with: `<venv>/bin/python -c "import lightrag, tiktoken, openai"`.
 
 ## Hermes Agent wiring
 
