@@ -1,19 +1,37 @@
 [project]
 name = "lightrag-mcp"
-version = "0.1.0"
-description = "MCP server for LightRAG knowledge graphs with local HuggingFace embeddings"
+version = "0.2.0"
+description = "MCP server + CLI for LightRAG knowledge graphs with local HuggingFace embeddings"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
+    # The server (MCP) and the pipeline helpers share ONE venv — two interpreters is what let
+    # lightrag go missing from the MCP venv while the hermes venv still had it.
     "lightrag-hku>=1.5.7,<2",
     "mcp>=1.9,<2",
-    "sentence-transformers>=3,<6",
-    "tiktoken>=0.8",
-    "requests>=2.31",
+    "openai>=2,<4",
+    "tiktoken>=0.8,<1",
+    "numpy>=1.24,<3",
+    "sentence-transformers>=3,<7",
+    "transformers>=4.40,<6",
+    "torch>=2.2",
+    "requests>=2.31,<3",
+    "PyYAML>=6,<7",
+    # PDF page/bookmark access for make_sections.py and the book pipeline
+    "pymupdf>=1.24,<2",
 ]
 
+[project.optional-dependencies]
+# CPU-only torch keeps the install ~2 GB smaller than the default CUDA wheel:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+onnx = ["onnxruntime>=1.17,<2"]
+hub = ["huggingface_hub>=0.23"]
+
 [project.scripts]
-lightrag-mcp = "lightrag_kg_mcp.server:main"
+kg-mcp = "lightrag_kg_mcp.server:main"
+kg-query = "lightrag_kg_mcp.kg_query:main"
+kg-answer = "lightrag_kg_mcp.kg_answer:main"
+kg-book = "lightrag_kg_mcp.kg_book:main"
 
 [build-system]
 requires = ["setuptools>=68"]

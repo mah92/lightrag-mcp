@@ -53,15 +53,55 @@ delete) resolves `<root>/graph` + `<root>/inputs` — no symlink farm, no copyin
 stays under `~/lightrag/kg/<name>/` as the registry entry, and `kg_delete` never removes data that
 lives outside it unless you pass `delete_data=true`.
 
-## Install
+## Install (independent procedure)
+
+One venv, one package: the MCP server **and** the pipeline CLI live in the same interpreter.
+A second venv without `lightrag` is exactly how the graph tools broke silently before
+(`kg_create` worked, `kg_ask` did not) — don't rebuild that shape.
 
 ```bash
-# python deps (CPU torch is enough)
-pip install lightrag-hku==1.5.7 'mcp>=1.9,<2' torch --index-url https://download.pytorch.org/whl/cpu
-pip install sentence-transformers transformers tiktoken requests
+git clone git@github.com:mah92/lightrag-mcp.git && cd lightrag-mcp
+./install.sh                      # venv -> ~/.hermes/lightrag-mcp-venv (LIGHTRAG_MCP_VENV overrides)
+```
 
-# or pull the models + verify environment from inside the MCP itself:
-#   call kg_setup(models="both")
+`install.sh` creates the venv, installs CPU-only torch, installs the package, and then runs the
+one check that catches the classic outage:
+
+```
+python -c "import lightrag, torch, sentence_transformers, fitz, mcp.server.fastmcp"
+```
+
+Manual equivalent:
+
+```bash
+python3.11 -m venv ~/.hermes/lightrag-mcp-venv
+~/.hermes/lightrag-mcp-venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+~/.hermes/lightrag-mcp-venv/bin/pip install -e .
+```
+
+Register it with Hermes (per profile — `-p <name>` for another profile):
+
+```bash
+hermes mcp add lightrag-kg --command ~/.hermes/lightrag-mcp-venv/bin/kg-mcp
+```
+
+`DEEPSEEK_API_KEY` must be in `~/.hermes/.env` (entity extraction + skill generation only;
+embeddings are always local). Models download on first use, or pre-fetch with `kg_setup`.
+
+### MCP server, or skill — or both?
+
+Both, and never duplicated:
+
+| piece | what it is | where it lives |
+|---|---|---|
+| this repo | behaviour: the MCP tools and the `kg-*` CLI | `mah92/lightrag-mcp` |
+| skill `book-to-lightrag-pipeline` | judgement: when to use which tool, graph conventions, pipeline pitfalls, eval/report formats | `mah92/my-hermes-skills` -> `~/.hermes/skills/` |
+| persona / profile glue | identity: persona name, persona text, chat ids, which graph — e.g. `askar.py` + `personas/askar.txt` | **outside** both (profile side) |
+
+Install the skill from the collection (knowledge, not code — no copies of the code in it):
+
+```bash
+cp -r ~/my-hermes-skills/book-to-lightrag-pipeline ~/.hermes/skills/
 ```
 
 Model downloads happen automatically on first use, or pre-fetch via `kg_setup`.
@@ -76,14 +116,17 @@ Check with: `<venv>/bin/python -c "import lightrag, tiktoken, openai"`.
 ```yaml
 mcp_servers:
   lightrag-kg:
-    command: <python-with-deps>/bin/python
-    args:
-      - /path/to/src/lightrag_kg_mcp/server.py
+    command: ~/.hermes/lightrag-mcp-venv/bin/kg-mcp     # or <venv>/bin/python + src/.../server.py
     enabled: true
 ```
 
-Requires `DEEPSEEK_API_KEY` in `~/.hermes/.env` (used for entity extraction and
-skill generation; embeddings never touch an API).
+### CLI (same venv, no MCP needed)
+
+```bash
+kg-book  kg_nav ./some-book.pdf        # PDF -> skill markdown -> graph (resumable)
+kg-query "arrival cost" -g kg_nav      # retrieved context only (cheap, no answer LLM)
+kg-answer "why MHE?" -g kg_nav --persona-file p.txt --name "Expert"
+```
 
 ## Companion scripts
 

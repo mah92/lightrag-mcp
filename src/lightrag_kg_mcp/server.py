@@ -13,30 +13,34 @@ Graphs live in ~/lightrag/kg_<name>/, embeddings are local models only.
 """
 import os, re, sys, json, time, asyncio, hashlib, shutil, glob, subprocess
 
-# tiktoken may need o200k_base offline: if a cached copy exists anywhere, point TIKTOKEN_CACHE_DIR at it
-if "TIKTOKEN_CACHE_DIR" not in os.environ:
-    _tc = os.path.expanduser("~/.cache/tiktoken_cache")
-    if os.path.isdir(_tc):
-        os.environ["TIKTOKEN_CACHE_DIR"] = _tc
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("lightrag-kg")
 
-BASE = os.path.expanduser("~/lightrag/kg")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kg_common import (BASE, HERMES_PY, JOBS, inputs_dir as _inputs_dir, meta_of as _meta_of,  # noqa: E402
+                       graph_dir as _graph_dir, script as _script, safe_name as _safe_name,
+                       env_value, job_new_id, job_paths)
+
 LIBRARY = os.path.expanduser("~/Documents/INS-nav-library")
-PY = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/python")
+
+
+def _pipeline_python() -> str:
+    """Interpreter for the pipeline helpers: this one when it has lightrag + pymupdf (one-venv install),
+    else the hermes venv (older two-venv installs)."""
+    import importlib.util
+    if importlib.util.find_spec("lightrag") and importlib.util.find_spec("fitz"):
+        return sys.executable
+    return HERMES_PY
 
 # ---------------- graph registry + warm cache ----------------
 _GRAPHS: dict[str, object] = {}
 _LAST_USE: dict[str, float] = {}
 _TTL = 15 * 60
 
-DEEPSEEK_KEY = ""
-for _line in open(os.path.expanduser("~/.hermes/.env")):
-    if _line.startswith("DEEPSEEK_API_KEY="):
-        DEEPSEEK_KEY = _line.strip().split("=", 1)[1]
+DEEPSEEK_KEY = env_value("DEEPSEEK_API_KEY", "")
 
 def _evict_expired():
     now = time.time()
@@ -125,43 +129,6 @@ def _export_onnx(model_name: str, out_path: str):
                                         "embedding": {0: "batch"}},
                           opset_version=14)
     tok.save_pretrained(os.path.dirname(out_path))
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-def _script(name: str) -> str:
-    """Pipeline helpers ship beside server.py; older installs keep copies in ~/lightrag/kg_mcp."""
-    for d in (_HERE, os.path.expanduser("~/lightrag/kg_mcp")):
-        p = os.path.join(d, name)
-        if os.path.exists(p):
-            return p
-    return os.path.join(_HERE, name)
-
-
-def _meta_of(name: str):
-    """(meta, path) for a registered graph; (None, path) when the registry entry is missing."""
-    mp = f"{BASE}/{name}/meta.json"
-    if not os.path.exists(mp):
-        return None, mp
-    try:
-        return json.load(open(mp)), mp
-    except Exception:
-        return {}, mp
-
-
-def _graph_dir(name: str, meta=None) -> str:
-    """Where a graph's DATA lives: BASE/<name> normally, or meta['root'] for graphs kept elsewhere
-    (e.g. ~/lightrag/ins-nav). A symlinked BASE/<name>/graph|inputs also works, but 'root' needs no
-    symlinks and is what kg_register writes."""
-    if meta is None:
-        meta = _meta_of(name)[0] or {}
-    root = meta.get("root")
-    return os.path.abspath(os.path.expanduser(root)) if root else f"{BASE}/{name}"
-
-
-def _inputs_dir(name: str, meta=None) -> str:
-    return f"{_graph_dir(name, meta)}/inputs"
-
 
 def _model_for(lang: str) -> str:
     # e5-small wins the fa+en benchmark (0.395/0.772 MRR@10, fastest index); heydariAI stays
@@ -273,33 +240,59 @@ def kg_list() -> str:
     return json.dumps(out, indent=1)
 
 @mcp.tool()
-async def kg_add_book(graph: str, pdf_path: str, language: str = "en") -> str:
-    """Convert a book PDF into a skill (book-to-skill pipeline via subagent delegate script) and insert its markdown into the graph."""
+async def kg_add_book(graph: str, pdf_path: str, language: str = "en", background: bool = False) -> str:
+    """Book PDF -> skill markdown -> graph (runs the shared, resumable kg_book.py pipeline).
+
+    background=True returns at once with a job id and log path (poll with kg_jobs) — the right
+    choice for real books, which take 20-30 min; the foreground call blocks this MCP server.
+    """
+    pdf_path = os.path.abspath(os.path.expanduser(pdf_path))
+    if _meta_of(graph)[0] is None:
+        return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
     if not os.path.exists(pdf_path):
         return json.dumps({"error": f"no such pdf: {pdf_path}"})
-    slug = os.path.splitext(os.path.basename(pdf_path))[0].lower().replace(" ", "-")[:40]
-    extract_dir = f"/tmp/extracted/{slug}"
-    os.makedirs(extract_dir, exist_ok=True)
-    subprocess.run(["pdftotext", pdf_path, f"{extract_dir}/full_text.txt"], timeout=600)
-    # chapter boundaries from the PDF's own bookmarks/ToC; generate_skill.py picks up sections.json when
-    # present (a "Chapter N" regex alone found 2 of 10 chapters in a 681-page book). Non-fatal.
-    sec = _script("make_sections.py")
-    if os.path.exists(sec):
-        sr = subprocess.run([PY, sec, pdf_path, extract_dir], capture_output=True, text=True, timeout=1800)
-        if sr.returncode != 0:
-            print(f"make_sections failed ({sr.returncode}): {sr.stderr[-300:]}")
-    # generate a skill via the no-agent batch script (book-to-lightrag-pipeline style), then insert the md files
-    skill_dir = f"{LIBRARY}/skills/all-skills/{slug}"
-    script = _script("generate_skill.py")
-    r = subprocess.run([PY, script, extract_dir, skill_dir, language], capture_output=True, text=True, timeout=7200)
-    if not os.path.exists(f"{skill_dir}/SKILL.md"):
-        return json.dumps({"error": "skill generation failed", "stderr": r.stderr[-400:]})
-    indir = _inputs_dir(graph)
-    os.makedirs(indir, exist_ok=True)
-    for f in [f"{skill_dir}/SKILL.md"] + glob.glob(f"{skill_dir}/*.md") + glob.glob(f"{skill_dir}/chapters/*.md"):
-        shutil.copy(f, f"{indir}/{slug}__{os.path.basename(f)}")
-    inserted = await _insert_files(graph, sorted(glob.glob(f"{indir}/{slug}__*.md")))
-    return json.dumps({"ok": True, "skill": slug, "docs_inserted": inserted})
+    args = [_pipeline_python(), _script("kg_book.py"), graph, pdf_path, "--language", language,
+            "--skill-root", f"{LIBRARY}/skills/all-skills"]
+    if background:
+        job_id = job_new_id(_safe_name(os.path.splitext(os.path.basename(pdf_path))[0].lower())[:40])
+        jdir, jjson, jlog = job_paths(job_id)
+        os.makedirs(jdir, exist_ok=True)
+        # seed the job record before spawning: a job whose child has not written yet must not read
+        # as "unknown" when polled immediately (the child's first update merges over this).
+        json.dump({"job": job_id, "state": "starting", "graph": graph, "pdf": pdf_path,
+                   "started": time.strftime("%Y-%m-%d %H:%M:%S")}, open(jjson, "w"), indent=1)
+        with open(jlog, "w") as fh:
+            p = subprocess.Popen(args + ["--job-json", jjson], stdout=fh, stderr=subprocess.STDOUT,
+                                 start_new_session=True, cwd=jdir)
+        d0 = json.load(open(jjson)); d0["pid"] = p.pid
+        json.dump(d0, open(jjson, "w"), indent=1)
+        return json.dumps({"ok": True, "job": job_id, "pid": p.pid, "log": jlog,
+                           "hint": "poll with kg_jobs; the job keeps running if this server restarts"})
+    r = subprocess.run(args, capture_output=True, text=True, timeout=14400)
+    tail = ((r.stdout or "") + (r.stderr or ""))[-400:]
+    if "DONE" not in (r.stdout or ""):
+        return json.dumps({"error": "book pipeline failed", "rc": r.returncode, "tail": tail})
+    return json.dumps({"ok": True, "graph": graph, "pdf": os.path.basename(pdf_path), "tail": tail})
+
+@mcp.tool()
+def kg_jobs(limit: int = 10) -> str:
+    """Status of background jobs (kg_add_book(background=True)): state, graph, pdf, docs_inserted, log."""
+    import glob as _glob
+    out = []
+    for jd in sorted(_glob.glob(f"{JOBS}/*"), key=os.path.getmtime, reverse=True)[:limit]:
+        jp = f"{jd}/job.json"
+        d = json.load(open(jp)) if os.path.exists(jp) else {}
+        pid = d.get("pid")
+        state = d.get("state", "unknown")
+        if state == "running" and pid and not os.path.exists(f"/proc/{pid}"):
+            state = "dead (process gone; re-run kg_add_book to resume)"
+        out.append({"job": os.path.basename(jd), "state": state, "graph": d.get("graph"),
+                    "pdf": os.path.basename(d["pdf"]) if d.get("pdf") else None,
+                    "docs_inserted": d.get("docs_inserted"), "started": d.get("started"),
+                    "finished": d.get("finished"), "error": d.get("error"),
+                    "log": f"{jd}/job.log" if os.path.exists(f"{jd}/job.log") else None})
+    return json.dumps(out, indent=1, ensure_ascii=False)
+
 
 @mcp.tool()
 async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
@@ -312,7 +305,7 @@ async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
     # 1) arc42 if missing -> delegate to arc42 script
     arc = f"{repo_path}/docs/arc42/arc42.md"
     if not os.path.exists(arc):
-        subprocess.run([PY, _script("make_arc42.py"), repo_path], capture_output=True, text=True, timeout=7200)
+        subprocess.run([_pipeline_python(), _script("make_arc42.py"), repo_path], capture_output=True, text=True, timeout=7200)
     indir = _inputs_dir(graph)
     if os.path.exists(arc):
         os.makedirs(indir, exist_ok=True)
@@ -325,7 +318,7 @@ async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
         if not os.path.exists(f"{skill_dir}/SKILL.md"):
             ed = f"/tmp/extracted/{slug}"; os.makedirs(ed, exist_ok=True)
             subprocess.run(["pdftotext", pdf, f"{ed}/full_text.txt"], timeout=600)
-            subprocess.run([PY, _script("generate_skill.py"), ed, skill_dir, language], capture_output=True, text=True, timeout=7200)
+            subprocess.run([_pipeline_python(), _script("generate_skill.py"), ed, skill_dir, language], capture_output=True, text=True, timeout=7200)
         if os.path.exists(f"{skill_dir}/SKILL.md"):
             for f in [f"{skill_dir}/SKILL.md"] + glob.glob(f"{skill_dir}/*.md") + glob.glob(f"{skill_dir}/chapters/*.md"):
                 dst = f"{indir}/{slug}__{os.path.basename(f)}"
@@ -474,5 +467,10 @@ def kg_setup(models: str = "both") -> str:
         out["onnx"][m] = "ready" if sess else "export failed (torch fallback will be used)"
     return json.dumps(out, indent=1)
 
-if __name__ == "__main__":
+def main():
+    """Console entry point: ``kg-mcp`` (stdio MCP server)."""
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
