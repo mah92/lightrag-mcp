@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Answer a question from a LightRAG graph with a persona prompt — no profile names baked in.
+"""kg-ask — answer a question from a LightRAG graph with a persona prompt (no profile names baked in).
 
-  kg-answer "question" -g kg_nav [--persona-file FILE] [--name "Askar"] [--max-tokens 2000]
+Same operation as the MCP tool ``kg_ask`` (retrieve context, then let an LLM answer with [ref N]
+citations); this is the standalone CLI form. For context only, use ``kg-query``.
+
+  kg-ask "question" -g kg_nav [--persona-file FILE] [--name "Askar"] [--max-tokens 2000]
                        [--send --chat <id>] [--send-platform bale]
 
 The persona is DATA, not code: pass a text file (a profile keeps its own, e.g.

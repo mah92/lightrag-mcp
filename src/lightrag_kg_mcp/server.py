@@ -7,6 +7,7 @@ Tools:
   kg_add_book(graph, pdf_path)  - book -> skill (book-to-skill pipeline) -> insert into graph
   kg_add_repo(graph, repo_path) - repo -> arc42 doc + skill its reference PDFs -> insert
   kg_ask(graph, question, mode) - query a graph (loads it, keeps warm 15 min)
+  kg_query(graph, question, mode) - retrieve context only (no answer LLM)
   kg_add_markdown(graph, markdown|md_path) - insert markdown text/file straight into a graph
 
 Graphs live in ~/lightrag/kg_<name>/, embeddings are local models only.
@@ -241,7 +242,7 @@ def kg_list() -> str:
 
 @mcp.tool()
 async def kg_add_book(graph: str, pdf_path: str, language: str = "en", background: bool = False) -> str:
-    """Book PDF -> skill markdown -> graph (runs the shared, resumable kg_book.py pipeline).
+    """Book PDF -> skill markdown -> graph (runs the shared, resumable kg_add_book.py pipeline).
 
     background=True returns at once with a job id and log path (poll with kg_jobs) — the right
     choice for real books, which take 20-30 min; the foreground call blocks this MCP server.
@@ -251,7 +252,7 @@ async def kg_add_book(graph: str, pdf_path: str, language: str = "en", backgroun
         return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
     if not os.path.exists(pdf_path):
         return json.dumps({"error": f"no such pdf: {pdf_path}"})
-    args = [_pipeline_python(), _script("kg_book.py"), graph, pdf_path, "--language", language,
+    args = [_pipeline_python(), _script("kg_add_book.py"), graph, pdf_path, "--language", language,
             "--skill-root", f"{LIBRARY}/skills/all-skills"]
     if background:
         job_id = job_new_id(_safe_name(os.path.splitext(os.path.basename(pdf_path))[0].lower())[:40])
@@ -373,8 +374,28 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
                        "docs_inserted": inserted, "removed": removed})
 
 @mcp.tool()
+async def kg_query(graph: str, question: str, mode: str = "naive", max_chars: int = 12000) -> str:
+    """Retrieve context from the graph and return it raw — NO answering LLM, so it is cheap and fast.
+
+    Use it to read/ground yourself (or to feed another model), then answer your own way. ``kg_ask``
+    is the sibling that also generates a cited answer.
+    mode: naive (vector only) | hybrid (keyword extraction + vector, costs one LLM call)
+    | mix (entities + relations) | local | global.
+    """
+    rag = await _load_graph(graph)
+    ctx = await rag.aquery(question, param=__import__("lightrag").QueryParam(mode=mode, only_need_context=True))
+    ctx = str(ctx or "")
+    return json.dumps({"graph": graph, "mode": mode, "context_chars": len(ctx),
+                       "context": ctx[:max_chars]}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def kg_ask(graph: str, question: str, mode: str = "naive") -> str:
-    """Ask the graph. mode: naive (vector only, cheap) | hybrid (needs LLM keyword extraction). Graph stays warm 15 min."""
+    """Ask the graph and get an ANSWER (deepseek-chat) with [ref N] citations. Its sibling ``kg_query``
+    returns the retrieved context only, with no answer LLM.
+
+    mode: naive (vector only, cheap) | hybrid (needs LLM keyword extraction). Graph stays warm 15 min.
+    """
     rag = await _load_graph(graph)
     qp = __import__("lightrag").QueryParam(mode="naive" if mode == "naive" else "hybrid")
     return str(await rag.aquery(question, param=qp))

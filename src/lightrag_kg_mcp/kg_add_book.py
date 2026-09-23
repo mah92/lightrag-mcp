@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Book/document PDF -> skill markdown -> LightRAG graph, resumable and agent-free.
 
-  kg-book <graph> <pdf> [--language en] [--skill-root DIR] [--extract-dir DIR] [--job-dir DIR]
+  kg-add-book <graph> <pdf> [--language en] [--skill-root DIR] [--extract-dir DIR] [--job-dir DIR]
                         [--skip-insert] [--job-json PATH]
 
 Steps: pdftotext -> make_sections.py (chapter boundaries from the PDF's own bookmarks) ->

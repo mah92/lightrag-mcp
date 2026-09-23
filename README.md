@@ -123,9 +123,9 @@ mcp_servers:
 ### CLI (same venv, no MCP needed)
 
 ```bash
-kg-book  kg_nav ./some-book.pdf        # PDF -> skill markdown -> graph (resumable)
-kg-query "arrival cost" -g kg_nav      # retrieved context only (cheap, no answer LLM)
-kg-answer "why MHE?" -g kg_nav --persona-file p.txt --name "Expert"
+kg-add-book kg_nav ./some-book.pdf     # PDF -> skill markdown -> graph (resumable)
+kg-query "arrival cost" -g kg_nav      # context only — no answer LLM, no cost beyond embedding
+kg-ask   "why MHE?"     -g kg_nav --persona-file p.txt --name "Expert"   # answer + [ref N]
 ```
 
 ## Companion scripts

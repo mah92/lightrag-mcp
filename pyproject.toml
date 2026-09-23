@@ -30,8 +30,8 @@ hub = ["huggingface_hub>=0.23"]
 [project.scripts]
 kg-mcp = "lightrag_kg_mcp.server:main"
 kg-query = "lightrag_kg_mcp.kg_query:main"
-kg-answer = "lightrag_kg_mcp.kg_answer:main"
-kg-book = "lightrag_kg_mcp.kg_book:main"
+kg-ask = "lightrag_kg_mcp.kg_ask:main"
+kg-add-book = "lightrag_kg_mcp.kg_add_book:main"
 
 [build-system]
 requires = ["setuptools>=68"]
