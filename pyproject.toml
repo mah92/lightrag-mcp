@@ -1,6 +1,6 @@
 [project]
 name = "lightrag-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP server + CLI for LightRAG knowledge graphs with local HuggingFace embeddings"
 requires-python = ">=3.10"
 license = { text = "MIT" }
