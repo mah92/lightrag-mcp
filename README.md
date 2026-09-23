@@ -61,7 +61,7 @@ A second venv without `lightrag` is exactly how the graph tools broke silently b
 
 ```bash
 # both repos are public: HTTPS needs no key (use git@github.com:... if you prefer SSH)
-git clone --depth 1 --branch v0.2.0 https://github.com/mah92/lightrag-mcp.git && cd lightrag-mcp
+git clone --depth 1 --branch v0.2.1 https://github.com/mah92/lightrag-mcp.git && cd lightrag-mcp
 ./install.sh                      # venv -> ~/.hermes/lightrag-mcp-venv (LIGHTRAG_MCP_VENV overrides)
 ```
 
