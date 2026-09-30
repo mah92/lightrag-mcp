@@ -276,6 +276,96 @@ async def kg_add_book(graph: str, pdf_path: str, language: str = "en", backgroun
     return json.dumps({"ok": True, "graph": graph, "pdf": os.path.basename(pdf_path), "tail": tail})
 
 @mcp.tool()
+def kg_ingest(graph: str, steps: str, title: str = "", kind: str = "custom",
+              backup: str = "bash ~/.hermes/scripts/kg_graph_backup.sh",
+              workdir: str = "", background: bool = True) -> str:
+    """Start a staged ingest job into a graph (videos, sites or plain texts).
+
+    `steps` is a JSON array, run in order, each {"name": "...", "cmd": "shell command",
+    "inserts": ["skills__x.md", ...]} — the declared order is the contract
+    (collect -> ASR -> correct -> English -> skill -> graph). The MCP only stores the
+    spec and starts the runner: the volatile machinery stays in the scripts the steps
+    call. A graph backup runs before and after; the documents listed in `inserts` are
+    recorded in a manifest so kg_rollback can undo this run exactly.
+    """
+    import json as _json
+    try:
+        parsed = _json.loads(steps)
+    except Exception as e:
+        return _json.dumps({"error": f"steps must be a JSON array: {e}"})
+    if isinstance(parsed, dict):
+        parsed = parsed.get("steps", [])
+    if not isinstance(parsed, list) or not parsed:
+        return _json.dumps({"error": "steps must be a non-empty JSON array"})
+    if _meta_of(graph)[0] is None:
+        return _json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
+    job_id = job_new_id(_safe_name((title or kind).lower())[:32])
+    jdir, jjson, jlog = job_paths(job_id)
+    os.makedirs(jdir, exist_ok=True)
+    spec = {"job_id": job_id, "graph": graph, "kind": kind, "title": title,
+            "steps": parsed, "backup": backup, "workdir": os.path.expanduser(workdir or "~")}
+    spec_path = f"{jdir}/spec.json"
+    with open(spec_path, "w", encoding="utf-8") as f:
+        _json.dump(spec, f, ensure_ascii=False, indent=1)
+    _json.dump({"job": job_id, "state": "queued", "graph": graph, "kind": kind,
+                "title": title, "steps_total": len(parsed),
+                "started": time.strftime("%Y-%m-%d %H:%M:%S")},
+               open(jjson, "w"), ensure_ascii=False, indent=1)
+    runner = os.path.expanduser("~/lightrag/kg_mcp/kg_ingest.py")
+    if not os.path.exists(runner):
+        return _json.dumps({"error": f"runner missing: {runner}"})
+    logf = open(jlog, "a")
+    proc = subprocess.Popen([_pipeline_python(), runner, spec_path],
+                            stdout=logf, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    return _json.dumps({"job": job_id, "pid": proc.pid, "state": "queued",
+                        "steps": [s.get("name") for s in parsed],
+                        "spec": spec_path, "log": jlog,
+                        "hint": "poll with kg_jobs; roll back with kg_rollback(job_id)"})
+
+
+@mcp.tool()
+async def kg_rollback(job_id: str, dry_run: bool = False) -> str:
+    """Undo a kg_ingest job: delete exactly the graph documents that run inserted.
+
+    Uses the job manifest (the documents declared as `inserts` plus the ids the graph
+    actually stored). Nothing else in the graph is touched.
+    """
+    import json as _json
+    import glob as _glob
+    jdir = f"{JOBS}/{job_id}"
+    jjson = f"{jdir}/job.json"
+    if not os.path.exists(jjson):
+        return _json.dumps({"error": f"no such job: {job_id}"})
+    d = _json.load(open(jjson))
+    names = set()
+    for n in (d.get("manifest") or []):
+        names.add(os.path.basename(n))
+    # also every stored file of this run: the graph keeps file_name in doc_status
+    graph = d.get("graph")
+    stored = []
+    if graph:
+        try:
+            root = _graph_dir(graph)
+            ds = _json.load(open(os.path.join(root, "graph", "kv_store_doc_status.json")))
+            for v in ds.values():
+                fn = os.path.basename(v.get("file_path") or "")
+                if fn in names:
+                    stored.append(fn)
+        except Exception:
+            pass
+    names |= set(stored)
+    if not names:
+        return _json.dumps({"job": job_id, "removed": 0,
+                            "note": "manifest empty — nothing was inserted by this run"})
+    if dry_run:
+        return _json.dumps({"job": job_id, "would_remove": sorted(names)})
+    removed = await _delete_by_file_name(graph, names)
+    return _json.dumps({"job": job_id, "removed": [os.path.basename(r) for r in (removed or [])],
+                        "count": len(removed or [])})
+
+
+@mcp.tool()
 def kg_jobs(limit: int = 10) -> str:
     """Status of background jobs (kg_add_book(background=True)): state, graph, pdf, docs_inserted, log."""
     import glob as _glob

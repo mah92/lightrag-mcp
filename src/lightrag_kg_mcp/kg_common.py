@@ -111,12 +111,18 @@ def embedding_dim(model) -> int:
 
 
 def build_rag(name: str = None, root: str = None, meta=None, embedding_model_name: str = None,
-              llm_max_async: int = 2, embed_max_async: int = 2):
+              llm_max_async: int = None, embed_max_async: int = None):
     """Load a LightRAG instance with the graph's own embedding model (dim probed at runtime).
 
-    Pass ``name`` for a registered graph, or ``root`` for a bare graph directory.
-    Returns ``(rag, working_dir)``; call ``await rag.initialize_storages()`` next.
+    Concurrency defaults to 2 (the value that survived the OOM on the old 9.7 GB
+    VM) but can be raised per-run with LIGHTRAG_LLM_ASYNC / LIGHTRAG_EMBED_ASYNC —
+    useful when ingesting a large corpus on a 30 GB box.
     """
+    import os as _os
+    if llm_max_async is None:
+        llm_max_async = int(_os.environ.get("LIGHTRAG_LLM_ASYNC", "2") or 2)
+    if embed_max_async is None:
+        embed_max_async = int(_os.environ.get("LIGHTRAG_EMBED_ASYNC", "2") or 2)
     from lightrag import LightRAG
     from lightrag.llm.openai import openai_complete_if_cache
     from lightrag.utils import EmbeddingFunc
