@@ -275,18 +275,14 @@ async def kg_add_book(graph: str, pdf_path: str, language: str = "en", backgroun
         return json.dumps({"error": "book pipeline failed", "rc": r.returncode, "tail": tail})
     return json.dumps({"ok": True, "graph": graph, "pdf": os.path.basename(pdf_path), "tail": tail})
 
-@mcp.tool()
-def kg_ingest(graph: str, steps: str, title: str = "", kind: str = "custom",
-              backup: str = "bash ~/.hermes/scripts/kg_graph_backup.sh",
-              workdir: str = "", background: bool = True) -> str:
-    """Start a staged ingest job into a graph (videos, sites or plain texts).
+def _start_staged_job(graph: str, steps: str, title: str, kind: str,
+                     backup: str, workdir: str) -> str:
+    """Shared body of kg_add_videos / kg_add_sites: store the spec, start the runner.
 
-    `steps` is a JSON array, run in order, each {"name": "...", "cmd": "shell command",
-    "inserts": ["skills__x.md", ...]} — the declared order is the contract
-    (collect -> ASR -> correct -> English -> skill -> graph). The MCP only stores the
-    spec and starts the runner: the volatile machinery stays in the scripts the steps
-    call. A graph backup runs before and after; the documents listed in `inserts` are
-    recorded in a manifest so kg_rollback can undo this run exactly.
+    `steps` is a JSON array run in order — the order is the contract
+    (collect -> ASR -> correct -> English -> skill -> graph). The MCP does not know
+    about yt-dlp, proxies or ASR models: those live in the scripts each step calls,
+    so an upstream change never needs a new MCP release.
     """
     import json as _json
     try:
@@ -318,10 +314,40 @@ def kg_ingest(graph: str, steps: str, title: str = "", kind: str = "custom",
     proc = subprocess.Popen([_pipeline_python(), runner, spec_path],
                             stdout=logf, stderr=subprocess.STDOUT,
                             start_new_session=True)
-    return _json.dumps({"job": job_id, "pid": proc.pid, "state": "queued",
-                        "steps": [s.get("name") for s in parsed],
+    return _json.dumps({"job": job_id, "pid": proc.pid, "state": "queued", "kind": kind,
+                        "steps": [x.get("name") for x in parsed],
                         "spec": spec_path, "log": jlog,
-                        "hint": "poll with kg_jobs; roll back with kg_rollback(job_id)"})
+                        "hint": "poll with kg_jobs; undo with kg_rollback(job_id)"})
+
+
+@mcp.tool()
+def kg_add_videos(graph: str, steps: str, title: str = "",
+                  backup: str = "bash ~/.hermes/scripts/kg_graph_backup.sh",
+                  workdir: str = "") -> str:
+    """Add VIDEOS to a graph: download their audio, transcribe, correct, translate to
+    English, build the skills, then insert them — in that order.
+
+    `steps` is a JSON array of {"name": "...", "cmd": "shell command",
+    "inserts": ["corpus__x.md", "skills__x.md"]}. The command does the work (the
+    download/ASR machinery lives in scripts, not in this server); `inserts` names the
+    documents the step adds so the run can be undone later with kg_rollback.
+    Returns a job id immediately — poll it with kg_jobs.
+    """
+    return _start_staged_job(graph, steps, title, "videos", backup, workdir)
+
+
+@mcp.tool()
+def kg_add_sites(graph: str, steps: str, title: str = "",
+                 backup: str = "bash ~/.hermes/scripts/kg_graph_backup.sh",
+                 workdir: str = "") -> str:
+    """Add WEBSITES to a graph: crawl the pages, collect what users say about them,
+    build one skill per site, then insert them — in that order.
+
+    Same contract as kg_add_videos: `steps` is an ordered JSON array of
+    {"name", "cmd", "inserts"}; the shell commands do the work, the server only
+    tracks the run. Returns a job id immediately — poll it with kg_jobs.
+    """
+    return _start_staged_job(graph, steps, title, "sites", backup, workdir)
 
 
 @mcp.tool()
