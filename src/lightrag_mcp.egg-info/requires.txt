@@ -1,0 +1,17 @@
+lightrag-hku<2,>=1.5.7
+mcp<2,>=1.9
+openai<4,>=2
+tiktoken<1,>=0.8
+numpy<3,>=1.24
+sentence-transformers<7,>=3
+transformers<6,>=4.40
+torch>=2.2
+requests<3,>=2.31
+PyYAML<7,>=6
+pymupdf<2,>=1.24
+
+[hub]
+huggingface_hub>=0.23
+
+[onnx]
+onnxruntime<2,>=1.17

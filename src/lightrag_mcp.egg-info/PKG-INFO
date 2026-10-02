@@ -1,0 +1,21 @@
+Metadata-Version: 2.4
+Name: lightrag-mcp
+Version: 0.2.1
+Summary: MCP server + CLI for LightRAG knowledge graphs with local HuggingFace embeddings
+License: MIT
+Requires-Python: >=3.10
+Requires-Dist: lightrag-hku<2,>=1.5.7
+Requires-Dist: mcp<2,>=1.9
+Requires-Dist: openai<4,>=2
+Requires-Dist: tiktoken<1,>=0.8
+Requires-Dist: numpy<3,>=1.24
+Requires-Dist: sentence-transformers<7,>=3
+Requires-Dist: transformers<6,>=4.40
+Requires-Dist: torch>=2.2
+Requires-Dist: requests<3,>=2.31
+Requires-Dist: PyYAML<7,>=6
+Requires-Dist: pymupdf<2,>=1.24
+Provides-Extra: onnx
+Requires-Dist: onnxruntime<2,>=1.17; extra == "onnx"
+Provides-Extra: hub
+Requires-Dist: huggingface_hub>=0.23; extra == "hub"

@@ -12,8 +12,8 @@ set -euo pipefail
 
 SRC="${LIGHTRAG_KG_DIR:-$HOME/lightrag/kg}"
 DST="${LIGHTRAG_KG_BACKUP_DIR:-$HOME/backups/kg}"
-KEEP="${LIGHTRAG_KG_BACKUP_KEEP:-5}"
 mkdir -p "$DST"
+ts=$(date +%Y%m%d_%H%M)
 shopt -s nullglob
 
 if [ "$#" -gt 0 ]; then
@@ -35,17 +35,6 @@ for name in "${graphs[@]}"; do
     fail=1
     continue
   fi
-  # Unique, self-describing name: minute precision made backup-before and backup-after of the SAME
-  # job collide on one file (the pre-run state was overwritten by the post-run one). Seconds + a
-  # phase label (KG_BACKUP_LABEL, set by kg_ingest.py) + a collision counter make every archive
-  # distinct and tell you which phase it captures.
-  base="$(date +%Y%m%d_%H%M%S)${KG_BACKUP_LABEL:+_$KG_BACKUP_LABEL}"
-  ts="$base"
-  n=1
-  while [ -e "$DST/${name}_${ts}.tar.gz" ]; do
-    ts="${base}_${n}"
-    n=$((n + 1))
-  done
   tar czf "$DST/${name}_${ts}.tar.gz" -C "$SRC" "$name"
   (cd "$DST" && sha256sum "${name}_${ts}.tar.gz" > "${name}_${ts}.sha256")
   if ! gzip -t "$DST/${name}_${ts}.tar.gz"; then
@@ -53,7 +42,7 @@ for name in "${graphs[@]}"; do
     fail=1
     continue
   fi
-  { ls -1t "$DST/${name}_"*.tar.gz 2>/dev/null || true; } | tail -n +$((KEEP + 1)) | while read -r f; do
+  { ls -1t "$DST/${name}_"*.tar.gz 2>/dev/null || true; } | tail -n +4 | while read -r f; do
     rm -f "$f" "${f%.tar.gz}.sha256"
   done
   echo "backed up $name -> $DST/${name}_${ts}.tar.gz"

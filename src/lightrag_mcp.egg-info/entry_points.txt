@@ -1,0 +1,5 @@
+[console_scripts]
+kg-add-book = lightrag_kg_mcp.kg_add_book:main
+kg-ask = lightrag_kg_mcp.kg_ask:main
+kg-mcp = lightrag_kg_mcp.server:main
+kg-query = lightrag_kg_mcp.kg_query:main

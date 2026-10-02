@@ -82,6 +82,11 @@ kg_add_videos(graph="kg_tajer", title="pcb supplier reviews", steps='[
   `backup_before`/`backup_after` (`ok` / `failed (exit N)` / `skipped`) and a failure is listed
   under `warnings` — a job that reports `done` with no backup is worse than one that says the
   backup failed. Keep a copy of the script wherever you like and pass its path if you prefer.
+- **Archive names are unique and say which phase they are:** `<graph>_<YYYYmmdd_HHMMSS>[_before|_after][_N].tar.gz`.
+  Second precision + the `KG_BACKUP_LABEL` phase + a collision counter — minute precision used to
+  make a fast job's before and after snapshots the same file, so the pre-run state was silently
+  overwritten. Retention keeps the **5** newest per graph with their `.sha256` files
+  (`LIGHTRAG_KG_BACKUP_KEEP` overrides it, `LIGHTRAG_KG_BACKUP_DIR` moves the target).
 - The call returns a **job id immediately** — the work happens in a detached runner
   (`kg_ingest.py`, resolved beside the server module). Per-step state, the manifest and the log
   live in `~/lightrag/jobs/<id>/` (`spec.json`, `job.json`, `job.log`).

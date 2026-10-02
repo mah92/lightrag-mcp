@@ -75,11 +75,8 @@ def main():
     warnings = load_warnings(job_json)
 
     # Backup before touching the graph. The exit code IS checked: a job that reports done with no
-    # backup is worse than a job that says the backup failed. KG_BACKUP_LABEL makes the archive
-    # name say which phase it captured (before/after), so a fast job cannot overwrite its own
-    # pre-run snapshot.
+    # backup is worse than a job that says the backup failed.
     if spec.get("backup"):
-        os.environ["KG_BACKUP_LABEL"] = "before"
         rc = run(spec["backup"], "backup-before")
         update(job_json, backup_before="ok" if rc == 0 else f"failed (exit {rc})", warnings=warnings)
         if rc != 0:
@@ -101,7 +98,6 @@ def main():
             break
 
     if spec.get("backup"):
-        os.environ["KG_BACKUP_LABEL"] = "after"
         rc = run(spec["backup"], "backup-after")
         update(job_json, backup_after="ok" if rc == 0 else f"failed (exit {rc})")
         if rc != 0:
