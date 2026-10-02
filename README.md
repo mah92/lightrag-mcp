@@ -33,6 +33,9 @@ Key properties:
 | `kg_add_book(graph, pdf_path)` | Book PDF → text extraction → section boundaries from the PDF's own bookmarks (`make_sections.py`, fallback `"Chapter N"` regex) → skill generation (deepseek-chat) → insert into graph |
 | `kg_add_repo(graph, repo_path)` | Repo → arc42 doc generation + skill-ify `docs/references/*.pdf` → insert |
 | `kg_add_markdown(graph, markdown, md_path, doc_name, replace)` | Insert markdown directly — inline text, a `.md` file, or a directory of them (no book/repo pipeline); `replace=true` refreshes a doc already stored under the same name |
+| `kg_add_videos(graph, steps, title)` | Staged ingest of VIDEOS: the `steps` you pass run in order (download audio → ASR → correction → English → one skill per video → insert). Returns a job id at once; poll `kg_jobs`, undo with `kg_rollback` |
+| `kg_add_sites(graph, steps, title)` | Staged ingest of WEBSITES: crawl the pages → collect what users say about them → one skill per site → insert. Same contract as `kg_add_videos` |
+| `kg_rollback(job_id, dry_run)` | Undo a staged run: delete exactly the graph documents that run inserted, by reading the run's manifest |
 | `kg_ask(graph, question, mode)` | Query the graph (`naive` = vector only, `hybrid` = + LLM keywords) |
 | `kg_register(graph, root)` | Register an EXISTING graph kept outside `~/lightrag/kg` (writes `meta.json` with `"root": root`; expects `<root>/graph/` + `<root>/inputs/`) |
 | `kg_delete(graph, confirm, delete_data)` | Delete a graph (requires `confirm=true`); a registered graph whose data lives elsewhere keeps its data unless `delete_data=true` |
@@ -52,6 +55,37 @@ kg_register("kg_nav", "/home/oem/lightrag/ins-nav")
 delete) resolves `<root>/graph` + `<root>/inputs` — no symlink farm, no copying. `meta.json` itself
 stays under `~/lightrag/kg/<name>/` as the registry entry, and `kg_delete` never removes data that
 lives outside it unless you pass `delete_data=true`.
+
+## Staged ingest: `kg_add_videos` / `kg_add_sites` / `kg_rollback`
+
+The two ingest tools do not contain any download/ASR/crawl machinery. They take the plan and run
+it, so an upstream change (yt-dlp, a proxy, a model) never needs a new MCP release:
+
+```
+kg_add_videos(graph="kg_tajer", title="pcb supplier reviews", steps='[
+  {"name": "collect",  "cmd": "bash ~/scripts/yt_collect.sh ..."},
+  {"name": "asr",      "cmd": "python ~/scripts/asr_batch.py ..."},
+  {"name": "insert",   "cmd": "... kg_query ...", "inserts": ["corpus__x.md", "skills__x.md"]}
+]')
+```
+
+- `steps` is a **JSON array run in order** — the order is the contract
+  (collect → ASR → correct → translate → skill → insert). Each entry is
+  `{"name", "cmd", "inserts"}`; `cmd` is a shell command run with `cwd=workdir`.
+- **`inserts` is the manifest.** Every file a step declares there is recorded, so
+  `kg_rollback(job_id)` can later delete exactly those documents and nothing else. A run with no
+  inserts is a no-op you can undo cleanly.
+- `backup` defaults to `bash ~/.hermes/scripts/kg_graph_backup.sh` and is taken before and after
+  the run; pass `backup=""` to skip.
+- The call returns a **job id immediately** — the work happens in a detached runner
+  (`kg_ingest.py`, resolved beside the server module). Poll with `kg_jobs`; per-step state, the
+  manifest and the log live in `~/lightrag/jobs/<id>/` (`job.json`, `job.log`).
+- A step whose command exits non-zero stops the run (`state: failed`, `error: "<step> (exit N)"`).
+  Note the manifest is written for a step's inserts even when that step fails, so review
+  `kg_rollback(job_id, dry_run=true)` before a real rollback.
+- `kg_rollback` resolves documents by **basename** (LightRAG stores basenames, not full paths), so
+  declare distinctive `inserts` names — a generic name (`ch04.md`) can collide with an unrelated
+  document already in the graph.
 
 ## Install (independent procedure)
 

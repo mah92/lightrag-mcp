@@ -9,6 +9,9 @@ Tools:
   kg_ask(graph, question, mode) - query a graph (loads it, keeps warm 15 min)
   kg_query(graph, question, mode) - retrieve context only (no answer LLM)
   kg_add_markdown(graph, markdown|md_path) - insert markdown text/file straight into a graph
+  kg_add_videos(graph, steps)   - staged ingest of videos (download -> ASR -> correct -> translate -> skill -> insert)
+  kg_add_sites(graph, steps)    - staged ingest of websites (crawl -> what users say -> one skill per site -> insert)
+  kg_rollback(job_id)           - undo a staged run: delete exactly the documents that run inserted
 
 Graphs live in ~/lightrag/kg_<name>/, embeddings are local models only.
 """
@@ -307,7 +310,7 @@ def _start_staged_job(graph: str, steps: str, title: str, kind: str,
                 "title": title, "steps_total": len(parsed),
                 "started": time.strftime("%Y-%m-%d %H:%M:%S")},
                open(jjson, "w"), ensure_ascii=False, indent=1)
-    runner = os.path.expanduser("~/lightrag/kg_mcp/kg_ingest.py")
+    runner = _script("kg_ingest.py")
     if not os.path.exists(runner):
         return _json.dumps({"error": f"runner missing: {runner}"})
     logf = open(jlog, "a")
