@@ -40,5 +40,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Non-editable installs must ship the staged-ingest helpers too (install.sh uses -e, but a plain
+# `pip install .` would otherwise drop them and the runner would be "missing").
+lightrag_kg_mcp = ["*.sh"]
+
 [tool.setuptools.package-dir]
 "" = "src"

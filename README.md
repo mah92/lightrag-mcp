@@ -36,6 +36,7 @@ Key properties:
 | `kg_add_videos(graph, steps, title)` | Staged ingest of VIDEOS: the `steps` you pass run in order (download audio → ASR → correction → English → one skill per video → insert). Returns a job id at once; poll `kg_jobs`, undo with `kg_rollback` |
 | `kg_add_sites(graph, steps, title)` | Staged ingest of WEBSITES: crawl the pages → collect what users say about them → one skill per site → insert. Same contract as `kg_add_videos` |
 | `kg_rollback(job_id, dry_run)` | Undo a staged run: delete exactly the graph documents that run inserted, by reading the run's manifest |
+| `kg_jobs(limit, include_stale)` | State of background jobs — book runs and staged ingests alike, each in its own shape; jobs whose graph was deleted are hidden unless `include_stale=true` |
 | `kg_ask(graph, question, mode)` | Query the graph (`naive` = vector only, `hybrid` = + LLM keywords) |
 | `kg_register(graph, root)` | Register an EXISTING graph kept outside `~/lightrag/kg` (writes `meta.json` with `"root": root`; expects `<root>/graph/` + `<root>/inputs/`) |
 | `kg_delete(graph, confirm, delete_data)` | Delete a graph (requires `confirm=true`); a registered graph whose data lives elsewhere keeps its data unless `delete_data=true` |
@@ -75,17 +76,29 @@ kg_add_videos(graph="kg_tajer", title="pcb supplier reviews", steps='[
 - **`inserts` is the manifest.** Every file a step declares there is recorded, so
   `kg_rollback(job_id)` can later delete exactly those documents and nothing else. A run with no
   inserts is a no-op you can undo cleanly.
-- `backup` defaults to `bash ~/.hermes/scripts/kg_graph_backup.sh` and is taken before and after
-  the run; pass `backup=""` to skip.
+- `backup` defaults to the `kg_graph_backup.sh` **shipped with this package** (next to the server
+  module), run for **this graph only** before and after the job; `backup=""` skips it and any other
+  string runs as your own command. The backup's exit code is **checked**: `job.json` records
+  `backup_before`/`backup_after` (`ok` / `failed (exit N)` / `skipped`) and a failure is listed
+  under `warnings` — a job that reports `done` with no backup is worse than one that says the
+  backup failed. Keep a copy of the script wherever you like and pass its path if you prefer.
 - The call returns a **job id immediately** — the work happens in a detached runner
-  (`kg_ingest.py`, resolved beside the server module). Poll with `kg_jobs`; per-step state, the
-  manifest and the log live in `~/lightrag/jobs/<id>/` (`job.json`, `job.log`).
+  (`kg_ingest.py`, resolved beside the server module). Per-step state, the manifest and the log
+  live in `~/lightrag/jobs/<id>/` (`spec.json`, `job.json`, `job.log`).
+- **`kg_jobs` prints the shape that matches the job kind.** Book jobs carry `pdf` + `docs_inserted`;
+  staged jobs carry `kind`, `title`, `step`/`step_index`, `steps_total`, `manifest` and `warnings`.
+  Jobs whose graph no longer exists are marked `"note": "graph no longer exists ..."` and are
+  **skipped unless `include_stale=True`**.
+- `kg_delete(graph, delete_data=true)` also removes the job records of that graph (a job whose
+  graph is gone can never be rolled back, so keeping it only pollutes `kg_jobs`).
 - A step whose command exits non-zero stops the run (`state: failed`, `error: "<step> (exit N)"`).
   Note the manifest is written for a step's inserts even when that step fails, so review
   `kg_rollback(job_id, dry_run=true)` before a real rollback.
 - `kg_rollback` resolves documents by **basename** (LightRAG stores basenames, not full paths), so
   declare distinctive `inserts` names — a generic name (`ch04.md`) can collide with an unrelated
-  document already in the graph.
+  document already in the graph. Both the dry run and a real run report the same **file names**
+  (`would_remove` / `removed`); a real run also returns `docs` with the `doc_id` and status of each
+  deletion.
 
 ## Install (independent procedure)
 

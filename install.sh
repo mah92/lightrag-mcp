@@ -38,6 +38,10 @@ EOF
     [ -x "$VENV/bin/$s" ] || { echo "  MISSING console script $s"; return 1; }
   done
   echo "  console scripts ok (kg-mcp kg-query kg-ask kg-add-book)"
+  for f in kg_ingest.py kg_graph_backup.sh; do
+    [ -f "$REPO_DIR/src/lightrag_kg_mcp/$f" ] || { echo "  MISSING staged-ingest helper $f"; return 1; }
+  done
+  echo "  staged-ingest helpers ok (kg_ingest.py, kg_graph_backup.sh)"
   echo "  DEEPSEEK_API_KEY: $(grep -c '^DEEPSEEK_API_KEY=..*' "$HOME/.hermes/.env" 2>/dev/null || echo 0) non-empty entry in ~/.hermes/.env"
   if [ -n "$(ls -A "$HOME/.cache/tiktoken_cache" 2>/dev/null)" ]; then
     echo "  tiktoken cache: ok"

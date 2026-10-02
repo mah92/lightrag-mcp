@@ -6,9 +6,9 @@ ordered list of steps (collect -> ASR -> correct -> English -> skill -> graph), 
 the volatile machinery (yt-dlp, proxies, ASR models, per-site quirks) lives in the
 scripts the steps call, not inside the server.
 
-Every step is recorded in the job JSON as it starts and finishes; a graph backup is
-taken before the run and after it; the documents each run inserts are written to a
-manifest so kg_rollback can undo exactly that run.
+Every step is recorded in the job JSON as it starts and finishes; a graph backup is taken before
+the run and after it (and a backup that FAILS is recorded as a warning — never silently assumed);
+the documents each run inserts are written to a manifest so kg_rollback can undo exactly that run.
 
 usage: kg_ingest.py <spec.json>
 """
@@ -38,6 +38,14 @@ def update(job_json, **fields):
     os.replace(tmp, job_json)
 
 
+def load_warnings(job_json):
+    """Warnings already recorded for this job (the server can seed one before the run)."""
+    try:
+        return list(json.load(open(job_json)).get("warnings") or [])
+    except Exception:
+        return []
+
+
 def main():
     spec_path = os.path.abspath(sys.argv[1])
     spec = json.load(open(spec_path, encoding="utf-8"))
@@ -63,9 +71,19 @@ def main():
            step=None, manifest=[], graph=spec.get("graph"), kind=spec.get("kind"),
            title=spec.get("title"), pid=os.getpid())
 
-    # backup before touching the graph
+    # Warnings can be seeded by the server (e.g. backup script missing) — keep them.
+    warnings = load_warnings(job_json)
+
+    # Backup before touching the graph. The exit code IS checked: a job that reports done with no
+    # backup is worse than a job that says the backup failed.
     if spec.get("backup"):
-        run(spec["backup"], "backup-before")
+        rc = run(spec["backup"], "backup-before")
+        update(job_json, backup_before="ok" if rc == 0 else f"failed (exit {rc})", warnings=warnings)
+        if rc != 0:
+            warnings.append(f"backup-before failed (exit {rc}) — this run is NOT backed up")
+            update(job_json, warnings=warnings)
+    else:
+        update(job_json, backup_before="skipped", warnings=warnings)
 
     manifest, failed = [], None
     for i, st in enumerate(spec["steps"], 1):
@@ -80,13 +98,18 @@ def main():
             break
 
     if spec.get("backup"):
-        run(spec["backup"], "backup-after")
+        rc = run(spec["backup"], "backup-after")
+        update(job_json, backup_after="ok" if rc == 0 else f"failed (exit {rc})")
+        if rc != 0:
+            warnings.append(f"backup-after failed (exit {rc})")
 
     if failed:
-        update(job_json, state="failed", error=failed, finished=now())
+        update(job_json, state="failed", error=failed, finished=now(), warnings=warnings)
     else:
-        update(job_json, state="done", finished=now())
+        update(job_json, state="done", finished=now(), warnings=warnings)
     lf.write(f"\n=== job {job_id}: {'FAILED ' + failed if failed else 'done'} at {now()}\n")
+    if warnings:
+        lf.write("=== warnings: " + "; ".join(warnings) + "\n")
     lf.close()
     return 1 if failed else 0
 

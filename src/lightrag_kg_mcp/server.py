@@ -30,6 +30,24 @@ from kg_common import (BASE, HERMES_PY, JOBS, inputs_dir as _inputs_dir, meta_of
 
 LIBRARY = os.path.expanduser("~/Documents/INS-nav-library")
 
+# Staged-ingest backup. "default" resolves at call time to the kg_graph_backup.sh that ships with
+# the package (so a fresh clone is backed up too) and backs up ONLY the graph being written; the
+# empty string skips the backup and any other value is run as the caller's own command.
+DEFAULT_BACKUP = "default"
+
+
+def _backup_cmd(graph: str, backup: str) -> tuple:
+    """(shell command, warning) for the staged-run backup. Warning is non-empty when the caller
+    asked for the default but the shipped script is missing — the run must say so, not fail quietly."""
+    if backup in ("", "none", "-"):
+        return "", ""
+    if backup == DEFAULT_BACKUP:
+        path = _script("kg_graph_backup.sh")
+        if not os.path.exists(path):
+            return "", f"backup script not found at {path} — the run is NOT backed up"
+        return f"bash {path} {graph}", ""
+    return backup, ""
+
 
 def _pipeline_python() -> str:
     """Interpreter for the pipeline helpers: this one when it has lightrag + pymupdf (one-venv install),
@@ -210,15 +228,21 @@ def _safe_name(s: str) -> str:
 
 
 async def _delete_by_file_name(graph: str, names: set) -> list:
-    """Delete documents whose stored file name is in `names` (the replace=True path)."""
+    """Delete documents whose stored file name is in `names` (the replace=True path).
+
+    Returns one entry per deleted document — {"file", "doc_id", "status"} — so callers report
+    file names instead of raw doc ids the caller never asked with.
+    """
     from lightrag.base import DocStatus
     rag = await _load_graph(graph)
     docs = await rag.doc_status.get_docs_by_statuses(list(DocStatus))
     removed = []
     for doc_id, st in docs.items():
-        if os.path.basename(st.file_path or "") in names:
+        fname = os.path.basename(st.file_path or "")
+        if fname in names:
             res = await rag.adelete_by_doc_id(doc_id)
-            removed.append(f"{doc_id}:{getattr(res, 'status', 'unknown')}")
+            removed.append({"file": fname, "doc_id": doc_id,
+                            "status": str(getattr(res, "status", "unknown"))})
     return removed
 
 # ---------------- tools ----------------
@@ -301,13 +325,18 @@ def _start_staged_job(graph: str, steps: str, title: str, kind: str,
     job_id = job_new_id(_safe_name((title or kind).lower())[:32])
     jdir, jjson, jlog = job_paths(job_id)
     os.makedirs(jdir, exist_ok=True)
+    backup, backup_warning = _backup_cmd(graph, backup)
     spec = {"job_id": job_id, "graph": graph, "kind": kind, "title": title,
             "steps": parsed, "backup": backup, "workdir": os.path.expanduser(workdir or "~")}
     spec_path = f"{jdir}/spec.json"
     with open(spec_path, "w", encoding="utf-8") as f:
         _json.dump(spec, f, ensure_ascii=False, indent=1)
-    _json.dump({"job": job_id, "state": "queued", "graph": graph, "kind": kind,
-                "title": title, "steps_total": len(parsed),
+    # Seed the record in the same shape kg_jobs prints for a staged job, so a poll right after the
+    # call shows steps/manifest rather than nulls (the runner merges over this as it progresses).
+    _json.dump({"job": job_id, "state": "queued", "kind": kind, "graph": graph, "title": title,
+                "steps_total": len(parsed), "step": None, "step_index": 0, "manifest": [],
+                "warnings": [backup_warning] if backup_warning else [],
+                "backup": backup or None,
                 "started": time.strftime("%Y-%m-%d %H:%M:%S")},
                open(jjson, "w"), ensure_ascii=False, indent=1)
     runner = _script("kg_ingest.py")
@@ -317,15 +346,19 @@ def _start_staged_job(graph: str, steps: str, title: str, kind: str,
     proc = subprocess.Popen([_pipeline_python(), runner, spec_path],
                             stdout=logf, stderr=subprocess.STDOUT,
                             start_new_session=True)
-    return _json.dumps({"job": job_id, "pid": proc.pid, "state": "queued", "kind": kind,
-                        "steps": [x.get("name") for x in parsed],
-                        "spec": spec_path, "log": jlog,
-                        "hint": "poll with kg_jobs; undo with kg_rollback(job_id)"})
+    out = {"job": job_id, "pid": proc.pid, "state": "queued", "kind": kind,
+           "steps": [x.get("name") for x in parsed],
+           "backup": backup or "none (skipped)",
+           "spec": spec_path, "log": jlog,
+           "hint": "poll with kg_jobs; undo with kg_rollback(job_id)"}
+    if backup_warning:
+        out["warning"] = backup_warning
+    return _json.dumps(out)
 
 
 @mcp.tool()
 def kg_add_videos(graph: str, steps: str, title: str = "",
-                  backup: str = "bash ~/.hermes/scripts/kg_graph_backup.sh",
+                  backup: str = DEFAULT_BACKUP,
                   workdir: str = "") -> str:
     """Add VIDEOS to a graph: download their audio, transcribe, correct, translate to
     English, build the skills, then insert them — in that order.
@@ -334,6 +367,9 @@ def kg_add_videos(graph: str, steps: str, title: str = "",
     "inserts": ["corpus__x.md", "skills__x.md"]}. The command does the work (the
     download/ASR machinery lives in scripts, not in this server); `inserts` names the
     documents the step adds so the run can be undone later with kg_rollback.
+    `backup` default = the kg_graph_backup.sh shipped with the package, run for THIS graph
+    before and after the job; "" (or "none") skips it; any other string runs as your own
+    command. A backup that fails is recorded in the job, never swallowed.
     Returns a job id immediately — poll it with kg_jobs.
     """
     return _start_staged_job(graph, steps, title, "videos", backup, workdir)
@@ -341,14 +377,15 @@ def kg_add_videos(graph: str, steps: str, title: str = "",
 
 @mcp.tool()
 def kg_add_sites(graph: str, steps: str, title: str = "",
-                 backup: str = "bash ~/.hermes/scripts/kg_graph_backup.sh",
+                 backup: str = DEFAULT_BACKUP,
                  workdir: str = "") -> str:
     """Add WEBSITES to a graph: crawl the pages, collect what users say about them,
     build one skill per site, then insert them — in that order.
 
     Same contract as kg_add_videos: `steps` is an ordered JSON array of
     {"name", "cmd", "inserts"}; the shell commands do the work, the server only
-    tracks the run. Returns a job id immediately — poll it with kg_jobs.
+    tracks the run; `backup` defaults to the shipped kg_graph_backup.sh for this graph
+    ("" skips it). Returns a job id immediately — poll it with kg_jobs.
     """
     return _start_staged_job(graph, steps, title, "sites", backup, workdir)
 
@@ -358,7 +395,9 @@ async def kg_rollback(job_id: str, dry_run: bool = False) -> str:
     """Undo a kg_ingest job: delete exactly the graph documents that run inserted.
 
     Uses the job manifest (the documents declared as `inserts` plus the ids the graph
-    actually stored). Nothing else in the graph is touched.
+    actually stored). Nothing else in the graph is touched. `dry_run=true` lists what would go;
+    a real run reports the same file names (`would_remove` / `removed`), plus `docs` with the
+    doc id and status of each deletion.
     """
     import json as _json
     import glob as _glob
@@ -388,29 +427,59 @@ async def kg_rollback(job_id: str, dry_run: bool = False) -> str:
         return _json.dumps({"job": job_id, "removed": 0,
                             "note": "manifest empty — nothing was inserted by this run"})
     if dry_run:
-        return _json.dumps({"job": job_id, "would_remove": sorted(names)})
+        return _json.dumps({"job": job_id, "would_remove": sorted(names), "count": len(names)})
     removed = await _delete_by_file_name(graph, names)
-    return _json.dumps({"job": job_id, "removed": [os.path.basename(r) for r in (removed or [])],
-                        "count": len(removed or [])})
+    return _json.dumps({"job": job_id,
+                        "removed": [r["file"] for r in removed],
+                        "count": len(removed),
+                        "docs": removed})
 
 
 @mcp.tool()
-def kg_jobs(limit: int = 10) -> str:
-    """Status of background jobs (kg_add_book(background=True)): state, graph, pdf, docs_inserted, log."""
+def kg_jobs(limit: int = 10, include_stale: bool = False) -> str:
+    """State of background jobs: book runs (kg_add_book) and staged ingests (kg_add_videos/kg_add_sites).
+
+    Book jobs report `pdf` + `docs_inserted`; staged jobs report `kind`, `step`/`step_index`,
+    `steps_total`, `manifest` (the documents the run declared — exactly what kg_rollback deletes)
+    and `warnings` (e.g. a backup that failed). Jobs whose graph no longer exists are marked
+    "(graph deleted)" and skipped unless include_stale=True.
+    """
     import glob as _glob
     out = []
-    for jd in sorted(_glob.glob(f"{JOBS}/*"), key=os.path.getmtime, reverse=True)[:limit]:
+    for jd in sorted(_glob.glob(f"{JOBS}/*"), key=os.path.getmtime, reverse=True):
         jp = f"{jd}/job.json"
         d = json.load(open(jp)) if os.path.exists(jp) else {}
+        graph = d.get("graph")
+        stale = bool(graph) and _meta_of(graph)[0] is None
+        if stale and not include_stale:
+            continue
+        if len(out) >= limit:
+            break
         pid = d.get("pid")
         state = d.get("state", "unknown")
-        if state == "running" and pid and not os.path.exists(f"/proc/{pid}"):
-            state = "dead (process gone; re-run kg_add_book to resume)"
-        out.append({"job": os.path.basename(jd), "state": state, "graph": d.get("graph"),
-                    "pdf": os.path.basename(d["pdf"]) if d.get("pdf") else None,
-                    "docs_inserted": d.get("docs_inserted"), "started": d.get("started"),
-                    "finished": d.get("finished"), "error": d.get("error"),
-                    "log": f"{jd}/job.log" if os.path.exists(f"{jd}/job.log") else None})
+        staged = bool(d.get("steps_total") or d.get("kind"))
+        if state in ("running", "queued", "starting") and pid and not os.path.exists(f"/proc/{pid}"):
+            state = ("dead (process gone; re-run the staged job or roll it back)"
+                     if staged else "dead (process gone; re-run kg_add_book to resume)")
+        rec = {"job": os.path.basename(jd), "state": state,
+               "kind": d.get("kind") or ("book" if d.get("pdf") else "unknown"),
+               "graph": graph, "title": d.get("title"),
+               "started": d.get("started"), "finished": d.get("finished"),
+               "error": d.get("error"),
+               "log": f"{jd}/job.log" if os.path.exists(f"{jd}/job.log") else None}
+        if stale:
+            rec["note"] = "graph no longer exists — this job can no longer be rolled back"
+        if d.get("pdf"):
+            rec["pdf"] = os.path.basename(d["pdf"])
+            rec["docs_inserted"] = d.get("docs_inserted")
+        if staged:
+            rec["step"] = d.get("step")
+            rec["step_index"] = d.get("step_index")
+            rec["steps_total"] = d.get("steps_total")
+            rec["manifest"] = [os.path.basename(x) for x in (d.get("manifest") or [])]
+            if d.get("warnings"):
+                rec["warnings"] = d["warnings"]
+        out.append(rec)
     return json.dumps(out, indent=1, ensure_ascii=False)
 
 
@@ -490,7 +559,7 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
     removed = await _delete_by_file_name(graph, {os.path.basename(f) for f in files}) if replace else []
     inserted = await _insert_files(graph, files)
     return json.dumps({"ok": True, "files": [os.path.basename(f) for f in files],
-                       "docs_inserted": inserted, "removed": removed})
+                       "docs_inserted": inserted, "removed": [r["file"] for r in removed]})
 
 @mcp.tool()
 async def kg_query(graph: str, question: str, mode: str = "naive", max_chars: int = 12000) -> str:
@@ -547,6 +616,20 @@ def kg_delete(graph: str, confirm: bool = False, delete_data: bool = False) -> s
         out["note"] = "registry entry removed; pass delete_data=true to also remove the data dir"
         if delete_data:
             _sh.rmtree(data); out["deleted_data"] = data
+    if (not external) or delete_data:
+        # A job record for a graph that no longer exists is dead weight: its manifest can never be
+        # rolled back and kg_jobs would keep listing it. Drop it together with the data.
+        removed_jobs = []
+        for jd in glob.glob(f"{JOBS}/*"):
+            try:
+                j = json.load(open(f"{jd}/job.json"))
+            except Exception:
+                continue
+            if j.get("graph") == graph:
+                _sh.rmtree(jd, ignore_errors=True)
+                removed_jobs.append(os.path.basename(jd))
+        if removed_jobs:
+            out["removed_jobs"] = removed_jobs
     return json.dumps(out)
 
 
