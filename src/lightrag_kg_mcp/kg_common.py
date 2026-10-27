@@ -142,13 +142,22 @@ def build_rag(name: str = None, root: str = None, meta=None, embedding_model_nam
             emb = model.encode(prefixed, batch_size=32, normalize_embeddings=True, show_progress_bar=False)
         return np.asarray(emb, dtype=np.float32)
 
+    # LLM is env-selectable so a fully local run is possible (e.g. the local Gemma llama.cpp server):
+    #   LIGHTRAG_LLM_MODEL=gemma-4-e2b LIGHTRAG_LLM_BASE_URL=http://127.0.0.1:8081/v1 LIGHTRAG_LLM_API_KEY=none
+    llm_model = (meta or {}).get("llm_model") or _os.environ.get("LIGHTRAG_LLM_MODEL") \
+        or env_value("LIGHTRAG_LLM_MODEL", "") or "deepseek-chat"
+    llm_base = (meta or {}).get("llm_base_url") or _os.environ.get("LIGHTRAG_LLM_BASE_URL") \
+        or env_value("LIGHTRAG_LLM_BASE_URL", "") or "https://api.deepseek.com/v1"
+    llm_key = (meta or {}).get("llm_api_key") or _os.environ.get("LIGHTRAG_LLM_API_KEY") \
+        or env_value("LIGHTRAG_LLM_API_KEY", "") or env_value("DEEPSEEK_API_KEY", "")
+
     async def llm(text, system_prompt=None, history_messages=[], **kw):
         kw.pop("hashing_kv", None)
         return await openai_complete_if_cache(
-            "deepseek-chat", text, system_prompt=system_prompt, history_messages=history_messages,
-            base_url="https://api.deepseek.com/v1", api_key=env_value("DEEPSEEK_API_KEY", ""), **kw)
+            llm_model, text, system_prompt=system_prompt, history_messages=history_messages,
+            base_url=llm_base, api_key=llm_key, **kw)
 
-    rag = LightRAG(working_dir=wd, llm_model_func=llm, llm_model_name="deepseek-chat",
+    rag = LightRAG(working_dir=wd, llm_model_func=llm, llm_model_name=llm_model,
                    llm_model_max_async=llm_max_async,
                    embedding_func=EmbeddingFunc(embedding_dim=dim, max_token_size=512, func=embed),
                    embedding_batch_num=16, embedding_func_max_async=embed_max_async)

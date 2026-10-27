@@ -1,6 +1,6 @@
 [project]
 name = "lightrag-mcp"
-version = "0.2.2"
+version = "0.3.0"
 description = "MCP server + CLI for LightRAG knowledge graphs with local HuggingFace embeddings"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -17,7 +17,7 @@ dependencies = [
     "torch>=2.2",
     "requests>=2.31,<3",
     "PyYAML>=6,<7",
-    # PDF page/bookmark access for make_sections.py and the book pipeline
+    # PDF page rendering + page count for the OCR path (ocr_to_md.py)
     "pymupdf>=1.24,<2",
 ]
 
@@ -31,7 +31,6 @@ hub = ["huggingface_hub>=0.23"]
 kg-mcp = "lightrag_kg_mcp.server:main"
 kg-query = "lightrag_kg_mcp.kg_query:main"
 kg-ask = "lightrag_kg_mcp.kg_ask:main"
-kg-add-book = "lightrag_kg_mcp.kg_add_book:main"
 
 [build-system]
 requires = ["setuptools>=68"]

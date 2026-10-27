@@ -4,14 +4,13 @@
 Tools:
   kg_create(name, language)     - create a new graph (embedding model by language: fa->Heidari, en->e5)
   kg_register(name, root)       - register an EXISTING graph that lives outside ~/lightrag/kg
-  kg_add_book(graph, pdf_path)  - book -> skill (book-to-skill pipeline) -> insert into graph
-  kg_add_repo(graph, repo_path) - repo -> arc42 doc + skill its reference PDFs -> insert
+  kg_add_markdown(graph, markdown|md_path) - THE ONLY add path: markdown text, .md file/dir,
+                                 or a PDF/image (OCR: Unlimited-OCR by default, local Gemma with
+                                 ocr="gemma") -> stored in inputs/ and inserted straight into the
+                                 graph, with no skill/conversion step in between
   kg_ask(graph, question, mode) - query a graph (loads it, keeps warm 15 min)
   kg_query(graph, question, mode) - retrieve context only (no answer LLM)
-  kg_add_markdown(graph, markdown|md_path) - insert markdown text/file straight into a graph
-  kg_add_videos(graph, steps)   - staged ingest of videos (download -> ASR -> correct -> translate -> skill -> insert)
-  kg_add_sites(graph, steps)    - staged ingest of websites (crawl -> what users say -> one skill per site -> insert)
-  kg_rollback(job_id)           - undo a staged run: delete exactly the documents that run inserted
+  kg_rollback(job_id)           - undo a legacy staged run (old job records only)
 
 Graphs live in ~/lightrag/kg_<name>/, embeddings are local models only.
 """
@@ -27,27 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kg_common import (BASE, HERMES_PY, JOBS, inputs_dir as _inputs_dir, meta_of as _meta_of,  # noqa: E402
                        graph_dir as _graph_dir, script as _script, safe_name as _safe_name,
                        env_value, job_new_id, job_paths)
-
-LIBRARY = os.path.expanduser("~/Documents/INS-nav-library")
-
-# Staged-ingest backup. "default" resolves at call time to the kg_graph_backup.sh that ships with
-# the package (so a fresh clone is backed up too) and backs up ONLY the graph being written; the
-# empty string skips the backup and any other value is run as the caller's own command.
-DEFAULT_BACKUP = "default"
-
-
-def _backup_cmd(graph: str, backup: str) -> tuple:
-    """(shell command, warning) for the staged-run backup. Warning is non-empty when the caller
-    asked for the default but the shipped script is missing — the run must say so, not fail quietly."""
-    if backup in ("", "none", "-"):
-        return "", ""
-    if backup == DEFAULT_BACKUP:
-        path = _script("kg_graph_backup.sh")
-        if not os.path.exists(path):
-            return "", f"backup script not found at {path} — the run is NOT backed up"
-        return f"bash {path} {graph}", ""
-    return backup, ""
-
 
 def _pipeline_python() -> str:
     """Interpreter for the pipeline helpers: this one when it has lightrag + pymupdf (one-venv install),
@@ -196,16 +174,26 @@ async def _load_graph(name: str):
                 normalize_embeddings=True, show_progress_bar=False)
         return np.asarray(emb, dtype=np.float32)
 
+    # LLM selection: per-graph meta.json first (llm_model / llm_base_url / llm_api_key),
+    # then env/`.env` (LIGHTRAG_LLM_*), then the deepseek-chat default. A graph pinned to a local
+    # llama.cpp server therefore runs fully offline without changing anything global.
+    llm_model = (meta or {}).get("llm_model") or os.environ.get("LIGHTRAG_LLM_MODEL") \
+        or env_value("LIGHTRAG_LLM_MODEL", "") or "deepseek-chat"
+    llm_base = (meta or {}).get("llm_base_url") or os.environ.get("LIGHTRAG_LLM_BASE_URL") \
+        or env_value("LIGHTRAG_LLM_BASE_URL", "") or "https://api.deepseek.com/v1"
+    llm_key = (meta or {}).get("llm_api_key") or os.environ.get("LIGHTRAG_LLM_API_KEY") \
+        or env_value("LIGHTRAG_LLM_API_KEY", "") or DEEPSEEK_KEY
+
     async def llm(text, system_prompt=None, history_messages=[], **kw):
         kw.pop("hashing_kv", None)
         return await openai_complete_if_cache(
-            "deepseek-chat", text, system_prompt=system_prompt,
+            llm_model, text, system_prompt=system_prompt,
             history_messages=history_messages,
-            base_url="https://api.deepseek.com/v1", api_key=DEEPSEEK_KEY, **kw)
+            base_url=llm_base, api_key=llm_key, **kw)
 
     rag = LightRAG(
         working_dir=wd,
-        llm_model_func=llm, llm_model_name="deepseek-chat",
+        llm_model_func=llm, llm_model_name=llm_model,
         llm_model_max_async=2,
         embedding_func=EmbeddingFunc(embedding_dim=dim, max_token_size=512, func=embed),
         embedding_batch_num=16, embedding_func_max_async=2,
@@ -259,140 +247,23 @@ def kg_create(name: str, language: str = "en") -> str:
 
 @mcp.tool()
 def kg_list() -> str:
-    """List all graphs with their embedding model and doc count."""
+    """List all graphs with their embedding model, doc count and the DOCUMENT LIST.
+
+    Every document added through kg_add_markdown lands in the graph's inputs/ directory, so this
+    listing is the automatic registry: a successful add shows up here with no extra step.
+    """
     out = []
     for d in sorted(glob.glob(f"{BASE}/*/meta.json")):
         m = json.load(open(d))
-        n = len(glob.glob(_inputs_dir(m["name"], m) + "/*.md"))
-        out.append({"graph": m["name"], "language": m.get("language"), "embedding": m.get("embedding_model"), "docs": n})
+        files = sorted(glob.glob(_inputs_dir(m["name"], m) + "/*.md"))
+        out.append({"graph": m["name"], "language": m.get("language"),
+                    "embedding": m.get("embedding_model"), "docs": len(files),
+                    "documents": [os.path.basename(f) for f in files]})
     return json.dumps(out, indent=1)
 
 @mcp.tool()
-async def kg_add_book(graph: str, pdf_path: str, language: str = "en", background: bool = False) -> str:
-    """Book PDF -> skill markdown -> graph (runs the shared, resumable kg_add_book.py pipeline).
-
-    background=True returns at once with a job id and log path (poll with kg_jobs) — the right
-    choice for real books, which take 20-30 min; the foreground call blocks this MCP server.
-    """
-    pdf_path = os.path.abspath(os.path.expanduser(pdf_path))
-    if _meta_of(graph)[0] is None:
-        return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
-    if not os.path.exists(pdf_path):
-        return json.dumps({"error": f"no such pdf: {pdf_path}"})
-    args = [_pipeline_python(), _script("kg_add_book.py"), graph, pdf_path, "--language", language,
-            "--skill-root", f"{LIBRARY}/skills/all-skills"]
-    if background:
-        job_id = job_new_id(_safe_name(os.path.splitext(os.path.basename(pdf_path))[0].lower())[:40])
-        jdir, jjson, jlog = job_paths(job_id)
-        os.makedirs(jdir, exist_ok=True)
-        # seed the job record before spawning: a job whose child has not written yet must not read
-        # as "unknown" when polled immediately (the child's first update merges over this).
-        json.dump({"job": job_id, "state": "starting", "graph": graph, "pdf": pdf_path,
-                   "started": time.strftime("%Y-%m-%d %H:%M:%S")}, open(jjson, "w"), indent=1)
-        with open(jlog, "w") as fh:
-            p = subprocess.Popen(args + ["--job-json", jjson], stdout=fh, stderr=subprocess.STDOUT,
-                                 start_new_session=True, cwd=jdir)
-        d0 = json.load(open(jjson)); d0["pid"] = p.pid
-        json.dump(d0, open(jjson, "w"), indent=1)
-        return json.dumps({"ok": True, "job": job_id, "pid": p.pid, "log": jlog,
-                           "hint": "poll with kg_jobs; the job keeps running if this server restarts"})
-    r = subprocess.run(args, capture_output=True, text=True, timeout=14400)
-    tail = ((r.stdout or "") + (r.stderr or ""))[-400:]
-    if "DONE" not in (r.stdout or ""):
-        return json.dumps({"error": "book pipeline failed", "rc": r.returncode, "tail": tail})
-    return json.dumps({"ok": True, "graph": graph, "pdf": os.path.basename(pdf_path), "tail": tail})
-
-def _start_staged_job(graph: str, steps: str, title: str, kind: str,
-                     backup: str, workdir: str) -> str:
-    """Shared body of kg_add_videos / kg_add_sites: store the spec, start the runner.
-
-    `steps` is a JSON array run in order — the order is the contract
-    (collect -> ASR -> correct -> English -> skill -> graph). The MCP does not know
-    about yt-dlp, proxies or ASR models: those live in the scripts each step calls,
-    so an upstream change never needs a new MCP release.
-    """
-    import json as _json
-    try:
-        parsed = _json.loads(steps)
-    except Exception as e:
-        return _json.dumps({"error": f"steps must be a JSON array: {e}"})
-    if isinstance(parsed, dict):
-        parsed = parsed.get("steps", [])
-    if not isinstance(parsed, list) or not parsed:
-        return _json.dumps({"error": "steps must be a non-empty JSON array"})
-    if _meta_of(graph)[0] is None:
-        return _json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
-    job_id = job_new_id(_safe_name((title or kind).lower())[:32])
-    jdir, jjson, jlog = job_paths(job_id)
-    os.makedirs(jdir, exist_ok=True)
-    backup, backup_warning = _backup_cmd(graph, backup)
-    spec = {"job_id": job_id, "graph": graph, "kind": kind, "title": title,
-            "steps": parsed, "backup": backup, "workdir": os.path.expanduser(workdir or "~")}
-    spec_path = f"{jdir}/spec.json"
-    with open(spec_path, "w", encoding="utf-8") as f:
-        _json.dump(spec, f, ensure_ascii=False, indent=1)
-    # Seed the record in the same shape kg_jobs prints for a staged job, so a poll right after the
-    # call shows steps/manifest rather than nulls (the runner merges over this as it progresses).
-    _json.dump({"job": job_id, "state": "queued", "kind": kind, "graph": graph, "title": title,
-                "steps_total": len(parsed), "step": None, "step_index": 0, "manifest": [],
-                "warnings": [backup_warning] if backup_warning else [],
-                "backup": backup or None,
-                "started": time.strftime("%Y-%m-%d %H:%M:%S")},
-               open(jjson, "w"), ensure_ascii=False, indent=1)
-    runner = _script("kg_ingest.py")
-    if not os.path.exists(runner):
-        return _json.dumps({"error": f"runner missing: {runner}"})
-    logf = open(jlog, "a")
-    proc = subprocess.Popen([_pipeline_python(), runner, spec_path],
-                            stdout=logf, stderr=subprocess.STDOUT,
-                            start_new_session=True)
-    out = {"job": job_id, "pid": proc.pid, "state": "queued", "kind": kind,
-           "steps": [x.get("name") for x in parsed],
-           "backup": backup or "none (skipped)",
-           "spec": spec_path, "log": jlog,
-           "hint": "poll with kg_jobs; undo with kg_rollback(job_id)"}
-    if backup_warning:
-        out["warning"] = backup_warning
-    return _json.dumps(out)
-
-
-@mcp.tool()
-def kg_add_videos(graph: str, steps: str, title: str = "",
-                  backup: str = DEFAULT_BACKUP,
-                  workdir: str = "") -> str:
-    """Add VIDEOS to a graph: download their audio, transcribe, correct, translate to
-    English, build the skills, then insert them — in that order.
-
-    `steps` is a JSON array of {"name": "...", "cmd": "shell command",
-    "inserts": ["corpus__x.md", "skills__x.md"]}. The command does the work (the
-    download/ASR machinery lives in scripts, not in this server); `inserts` names the
-    documents the step adds so the run can be undone later with kg_rollback.
-    `backup` default = the kg_graph_backup.sh shipped with the package, run for THIS graph
-    before and after the job; "" (or "none") skips it; any other string runs as your own
-    command. A backup that fails is recorded in the job, never swallowed.
-    Returns a job id immediately — poll it with kg_jobs.
-    """
-    return _start_staged_job(graph, steps, title, "videos", backup, workdir)
-
-
-@mcp.tool()
-def kg_add_sites(graph: str, steps: str, title: str = "",
-                 backup: str = DEFAULT_BACKUP,
-                 workdir: str = "") -> str:
-    """Add WEBSITES to a graph: crawl the pages, collect what users say about them,
-    build one skill per site, then insert them — in that order.
-
-    Same contract as kg_add_videos: `steps` is an ordered JSON array of
-    {"name", "cmd", "inserts"}; the shell commands do the work, the server only
-    tracks the run; `backup` defaults to the shipped kg_graph_backup.sh for this graph
-    ("" skips it). Returns a job id immediately — poll it with kg_jobs.
-    """
-    return _start_staged_job(graph, steps, title, "sites", backup, workdir)
-
-
-@mcp.tool()
 async def kg_rollback(job_id: str, dry_run: bool = False) -> str:
-    """Undo a kg_ingest job: delete exactly the graph documents that run inserted.
+    """Undo a legacy kg_ingest job: delete exactly the graph documents that run inserted.
 
     Uses the job manifest (the documents declared as `inserts` plus the ids the graph
     actually stored). Nothing else in the graph is touched. `dry_run=true` lists what would go;
@@ -484,50 +355,19 @@ def kg_jobs(limit: int = 10, include_stale: bool = False) -> str:
 
 
 @mcp.tool()
-async def kg_add_repo(graph: str, repo_path: str, language: str = "en") -> str:
-    """For a cloned repo: write arc42 doc (if missing), skill-ify its reference PDFs, insert all into the graph."""
-    repo_path = os.path.abspath(repo_path)
-    if not os.path.isdir(repo_path):
-        return json.dumps({"error": "no such repo dir"})
-    repo = os.path.basename(repo_path)
-    docs_added = []
-    # 1) arc42 if missing -> delegate to arc42 script
-    arc = f"{repo_path}/docs/arc42/arc42.md"
-    if not os.path.exists(arc):
-        subprocess.run([_pipeline_python(), _script("make_arc42.py"), repo_path], capture_output=True, text=True, timeout=7200)
-    indir = _inputs_dir(graph)
-    if os.path.exists(arc):
-        os.makedirs(indir, exist_ok=True)
-        shutil.copy(arc, f"{indir}/arc42__{repo}__arc42.md")
-        docs_added.append(f"arc42__{repo}__arc42.md")
-    # 2) skill-ify reference PDFs
-    for pdf in glob.glob(f"{repo_path}/docs/references/*.pdf"):
-        slug = os.path.splitext(os.path.basename(pdf))[0].lower()[:40]
-        skill_dir = f"{LIBRARY}/skills/all-skills/{slug}"
-        if not os.path.exists(f"{skill_dir}/SKILL.md"):
-            ed = f"/tmp/extracted/{slug}"; os.makedirs(ed, exist_ok=True)
-            subprocess.run(["pdftotext", pdf, f"{ed}/full_text.txt"], timeout=600)
-            subprocess.run([_pipeline_python(), _script("generate_skill.py"), ed, skill_dir, language], capture_output=True, text=True, timeout=7200)
-        if os.path.exists(f"{skill_dir}/SKILL.md"):
-            for f in [f"{skill_dir}/SKILL.md"] + glob.glob(f"{skill_dir}/*.md") + glob.glob(f"{skill_dir}/chapters/*.md"):
-                dst = f"{indir}/{slug}__{os.path.basename(f)}"
-                shutil.copy(f, dst)
-                if os.path.basename(dst) not in docs_added: docs_added.append(os.path.basename(dst))
-    files = [f"{indir}/{d}" for d in docs_added if os.path.exists(f"{indir}/{d}")]
-    inserted = await _insert_files(graph, files)
-    return json.dumps({"ok": True, "repo": repo, "docs": docs_added, "inserted": inserted})
-
-@mcp.tool()
-async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc_name: str = "", replace: bool = False) -> str:
-    """Insert markdown straight into a graph - no PDF/book/repo pipeline.
+async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc_name: str = "",
+                          replace: bool = False, ocr: str = "") -> str:
+    """Insert markdown straight into a graph - the ONLY way documents get added.
 
     markdown: inline markdown text (notes written directly)
-    md_path:  a .md file, or a directory (every *.md inside, recursively)
+    md_path:  a .md file, a directory (every *.md inside, recursively), or a PDF/image
+              (it is OCR'd to markdown first: Unlimited-OCR by default, local Gemma with ocr="gemma")
     doc_name: stored document name (default: the file's own name, or 'note' for inline text)
     replace:  delete a document already stored under the same name first. Without it an
               identical re-insert is a no-op (dedup is by content) and changed content
               leaves the old copy in the graph.
-    Returns {"ok": true, "files": [...], "docs_inserted": n, "removed": [...]}.
+    ocr:      "unlimited" (default) | "gemma" - only used when md_path is a PDF/image
+    Returns {"ok": true, "files": [...], "docs_inserted": n, "removed": [...], "documents": [...]}.
     """
     if _meta_of(graph)[0] is None:
         return json.dumps({"error": f"graph '{graph}' does not exist. Use kg_create or kg_register first."})
@@ -537,16 +377,38 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
         jobs.append((nm if nm.endswith(".md") else nm + ".md", markdown))
     elif md_path:
         p = os.path.abspath(os.path.expanduser(md_path))
+        from ocr_to_md import is_document, ocr_to_markdown
         if os.path.isdir(p):
             root = _safe_name(os.path.basename(p.rstrip("/")))
             for f in sorted(glob.glob(f"{p}/**/*.md", recursive=True)):
                 rel = _safe_name(os.path.relpath(f, p).replace("/", "__"))
                 jobs.append((f"{root}__{rel}", open(f, encoding="utf-8").read()))
+            for f in sorted(glob.glob(f"{p}/**/*", recursive=True)):
+                if os.path.isfile(f) and is_document(f):
+                    rel = _safe_name(os.path.relpath(f, p).replace("/", "__"))
+                    nm = (rel[:-4] if os.path.splitext(rel)[1].lower() in (".pdf", ".png", ".jpg", ".jpeg") else rel) + ".md"
+                    try:
+                        jobs.append((nm if nm.endswith(".md") else nm + ".md", ocr_to_markdown(f, ocr or None)))
+                    except Exception as e:
+                        return json.dumps({"error": f"OCR failed for {os.path.basename(f)}: {e}"})
         elif os.path.isfile(p):
             nm = _safe_name(doc_name) if doc_name else os.path.basename(p)
-            jobs.append((nm if nm.endswith(".md") else nm + ".md", open(p, encoding="utf-8").read()))
+            if is_document(p):
+                # strip only a real document extension: doc_name may itself contain dots
+                # (e.g. "2307.16430v1") and splitext would truncate it to "2307"
+                for ext in (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"):
+                    if nm.lower().endswith(ext):
+                        nm = nm[:-len(ext)]
+                        break
+                try:
+                    text = ocr_to_markdown(p, ocr or None)
+                except Exception as e:
+                    return json.dumps({"error": f"OCR failed: {e}"})
+                jobs.append((nm if nm.endswith(".md") else nm + ".md", text))
+            else:
+                jobs.append((nm if nm.endswith(".md") else nm + ".md", open(p, encoding="utf-8").read()))
         else:
-            return json.dumps({"error": f"no such md file or dir: {md_path}"})
+            return json.dumps({"error": f"no such md/pdf file or dir: {md_path}"})
     if not jobs:
         return json.dumps({"error": "give markdown text or md_path"})
     indir = _inputs_dir(graph)
@@ -558,8 +420,10 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
         files.append(dst)
     removed = await _delete_by_file_name(graph, {os.path.basename(f) for f in files}) if replace else []
     inserted = await _insert_files(graph, files)
+    listed = sorted(os.path.basename(f) for f in glob.glob(_inputs_dir(graph) + "/*.md"))
     return json.dumps({"ok": True, "files": [os.path.basename(f) for f in files],
-                       "docs_inserted": inserted, "removed": [r["file"] for r in removed]})
+                       "docs_inserted": inserted, "removed": [r["file"] for r in removed],
+                       "documents": listed})
 
 @mcp.tool()
 async def kg_query(graph: str, question: str, mode: str = "naive", max_chars: int = 12000) -> str:

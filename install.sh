@@ -5,7 +5,7 @@
 #   ./install.sh --check         # verify an existing install, change nothing (used by the skill)
 #   LIGHTRAG_MCP_VENV=/opt/kg-venv ./install.sh
 #
-# Installs the MCP server AND the pipeline CLI (kg-query / kg-ask / kg-add-book / kg-mcp) into the
+# Installs the MCP server AND the CLI (kg-query / kg-ask / kg-mcp) into the
 # SAME interpreter — that is the whole point: a second venv without lightrag is how the graph tools
 # silently broke before (kg_create worked, kg_ask did not).
 set -euo pipefail
@@ -27,21 +27,19 @@ import lightrag, torch, sentence_transformers, mcp.server.fastmcp  # noqa: F401
 ok_fitz = bool(u.find_spec("fitz"))
 print("  lightrag", lightrag.__version__)
 print("  mcp", md.version("mcp"), "| torch", torch.__version__, "| pymupdf", ok_fitz)
-for mod in ("kg_query", "kg_ask", "kg_add_book", "kg_common"):
+for mod in ("kg_query", "kg_ask", "kg_common", "ocr_to_md"):
     if not u.find_spec("lightrag_kg_mcp." + mod):
         raise SystemExit(f"  MISSING module lightrag_kg_mcp.{mod} — package not installed (pip install -e .)")
 print("  package modules ok")
 if not ok_fitz:
-    raise SystemExit("  pymupdf missing — `kg-add-book` cannot read PDF bookmarks")
+    raise SystemExit("  pymupdf missing — OCR of PDFs needs it (ocr_to_md.py)")
 EOF
-  for s in kg-mcp kg-query kg-ask kg-add-book; do
+  for s in kg-mcp kg-query kg-ask; do
     [ -x "$VENV/bin/$s" ] || { echo "  MISSING console script $s"; return 1; }
   done
-  echo "  console scripts ok (kg-mcp kg-query kg-ask kg-add-book)"
-  for f in kg_ingest.py kg_graph_backup.sh; do
-    [ -f "$REPO_DIR/src/lightrag_kg_mcp/$f" ] || { echo "  MISSING staged-ingest helper $f"; return 1; }
-  done
-  echo "  staged-ingest helpers ok (kg_ingest.py, kg_graph_backup.sh)"
+  echo "  console scripts ok (kg-mcp kg-query kg-ask)"
+  [ -f "$REPO_DIR/src/lightrag_kg_mcp/ocr_to_md.py" ] || { echo "  MISSING OCR helper ocr_to_md.py"; return 1; }
+  echo "  OCR helper ok (ocr_to_md.py)"
   echo "  DEEPSEEK_API_KEY: $(grep -c '^DEEPSEEK_API_KEY=..*' "$HOME/.hermes/.env" 2>/dev/null || echo 0) non-empty entry in ~/.hermes/.env"
   if [ -n "$(ls -A "$HOME/.cache/tiktoken_cache" 2>/dev/null)" ]; then
     echo "  tiktoken cache: ok"
@@ -106,7 +104,7 @@ Installed. Two more steps:
 
 Then build or register a graph:
 
-     $VENV/bin/kg-add-book kg_mine ~/Documents/Books/some.pdf  # PDF -> graph (long; see kg_jobs)
+     # adding documents: kg_add_markdown (MCP) - .md / text / PDF (OCR via Unlimited-OCR or Gemma)
      $VENV/bin/kg-query "question" -g kg_mine                 # context only (no answer LLM)
      $VENV/bin/kg-ask   "question" -g kg_mine                 # answer with [ref N] citations
 
