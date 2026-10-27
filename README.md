@@ -55,10 +55,18 @@ lives outside it unless you pass `delete_data=true`.
 
 ## OCR path
 
-PDFs and images go through `ocr_to_md.py`: `unlimited` (default) shells out to
-`~/AI/Unlimited-OCR` (`ocr.py` + its venv), `gemma` renders pages with pymupdf and asks the local
-llama.cpp OpenAI endpoint (`LIGHTRAG_OCR_GEMMA_URL`, default `http://127.0.0.1:8081/v1`). Env knobs:
-`OCR_UNLIMITED_DIR`, `OCR_BACKEND`, `LIGHTRAG_OCR_GEMMA_URL`, `LIGHTRAG_OCR_GEMMA_MODEL`.
+PDFs and images go through `ocr_to_md.py`. The engine follows the document language:
+
+| backend | engine | use for |
+|---|---|---|
+| `unlimited` (default) | Baidu Unlimited-OCR (`~/AI/Unlimited-OCR`) | Latin and other non-Persian scripts |
+| `deepseek` | DeepSeek-OCR via `pdf_craft` | **Persian — the only working engine for it** (Unlimited-OCR does not work on Persian at all) |
+| `gemma` | local Gemma 4 E2B vision (llama.cpp, `http://127.0.0.1:8081/v1`) | simple/sparse images only |
+
+`deepseek` needs a python with `pdf_craft` and `transformers<4.48` (`~/AI/deepseek-ocr-venv`);
+`OCR_DEEPSEEK_PY` and `DEEPSEEK_OCR_CACHE` override the interpreter and the weights directory
+(~6.3 GB fetched on first use). Env knobs: `OCR_UNLIMITED_DIR`, `OCR_BACKEND`,
+`LIGHTRAG_OCR_GEMMA_URL`, `LIGHTRAG_OCR_GEMMA_MODEL`.
 
 ## Install (independent procedure)
 

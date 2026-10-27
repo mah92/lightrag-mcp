@@ -366,7 +366,8 @@ async def kg_add_markdown(graph: str, markdown: str = "", md_path: str = "", doc
     replace:  delete a document already stored under the same name first. Without it an
               identical re-insert is a no-op (dedup is by content) and changed content
               leaves the old copy in the graph.
-    ocr:      "unlimited" (default) | "gemma" - only used when md_path is a PDF/image
+    ocr:      "unlimited" (default, Latin text) | "deepseek" (Persian - pdf_craft/DeepSeek-OCR,
+              PDF only) | "gemma" (local Gemma vision, simple pages only) - used for PDF/image input
     Returns {"ok": true, "files": [...], "docs_inserted": n, "removed": [...], "documents": [...]}.
     """
     if _meta_of(graph)[0] is None:
